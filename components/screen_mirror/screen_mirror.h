@@ -15,8 +15,6 @@
 #endif
 #endif
 
-#include "JPEGENC.h"
-
 namespace esphome {
 namespace screen_mirror {
 
@@ -74,9 +72,6 @@ class ScreenMirrorComponent : public Component {
   bool dirty_{true};
   uint32_t last_frame_time_{0};
   uint32_t frame_count_{0};
-
-  // JPEG Encoder instance
-  JPEGENC encoder_{};
 };
 
 }  // namespace screen_mirror
