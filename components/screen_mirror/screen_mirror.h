@@ -57,9 +57,7 @@ class ScreenMirrorComponent : public Component {
   bool show_telemetry_{true};
   uint8_t core_{0};
 
-  // Dedicated PSRAM buffers for zero-fragmentation encoding
-  uint8_t *raw_buffer_{nullptr};
-  size_t raw_buffer_size_{0};
+  // Dedicated PSRAM buffer for zero-fragmentation encoding
   uint8_t *jpeg_buffer_{nullptr};
   size_t jpeg_buffer_size_{0};
 

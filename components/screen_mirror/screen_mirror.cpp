@@ -148,7 +148,7 @@ static const char REMOTE_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       setTimeout(() => ripple.remove(), 400);
 
       try {
-        await fetch(`/tap?x=${x}&y=${y}`, { method: 'POST' });
+        await fetch(`/tap?x=${x}&y=${y}`, { method: 'POST', body: '' });
         setTimeout(() => refreshScreen(true), 120);
       } catch (err) {
         console.error(err);
@@ -166,13 +166,6 @@ void ScreenMirrorComponent::setup() {
   int w = (this->display_ != nullptr) ? this->display_->get_width() : 800;
   int h = (this->display_ != nullptr) ? this->display_->get_height() : 480;
 
-  // Allocate dedicated PSRAM working buffers for zero runtime heap fragmentation
-  this->raw_buffer_size_ = w * h * 2;
-  this->raw_buffer_ = (uint8_t *) heap_caps_malloc(this->raw_buffer_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (this->raw_buffer_ == nullptr) {
-    this->raw_buffer_ = (uint8_t *) malloc(this->raw_buffer_size_);
-  }
-
   this->jpeg_buffer_size_ = 256 * 1024; // 256 KB buffer for compressed JPEG
   this->jpeg_buffer_ = (uint8_t *) heap_caps_malloc(this->jpeg_buffer_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (this->jpeg_buffer_ == nullptr) {
@@ -182,8 +175,7 @@ void ScreenMirrorComponent::setup() {
   if (this->jpeg_buffer_ == nullptr) {
     ESP_LOGE(TAG, "Failed to allocate JPEG working buffer!");
   } else {
-    ESP_LOGI(TAG, "Allocated %u KB JPEG and %u KB raw frame PSRAM buffers",
-             (unsigned)(this->jpeg_buffer_size_ / 1024), (unsigned)(this->raw_buffer_size_ / 1024));
+    ESP_LOGI(TAG, "Allocated %u KB JPEG working buffer in PSRAM", (unsigned)(this->jpeg_buffer_size_ / 1024));
   }
 
 #if defined(HAS_LVGL)
@@ -210,8 +202,11 @@ void ScreenMirrorComponent::setup() {
    public:
     JpegSnapshotHandler(ScreenMirrorComponent *parent) : parent_(parent) {}
     bool canHandle(AsyncWebServerRequest *request) const override {
-      return request->method() == HTTP_GET &&
-             (request->url() == "/screenshot.jpg" || request->url() == "/screenshot.jpeg");
+      if (request->method() != HTTP_GET)
+        return false;
+      char url_buf[AsyncWebServerRequest::URL_BUF_SIZE];
+      auto url = request->url_to(url_buf);
+      return (url == "/screenshot.jpg" || url == "/screenshot.jpeg");
     }
     void handleRequest(AsyncWebServerRequest *request) override {
       const uint8_t *raw_buf = nullptr;
@@ -228,7 +223,7 @@ void ScreenMirrorComponent::setup() {
         return;
       }
 
-      AsyncWebServerResponse *response = request->beginResponse_P(200, "image/jpeg", out_jpeg, out_size);
+      AsyncWebServerResponse *response = request->beginResponse(200, "image/jpeg", out_jpeg, out_size);
       response->addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       response->addHeader("Access-Control-Allow-Origin", "*");
       request->send(response);
@@ -242,7 +237,10 @@ void ScreenMirrorComponent::setup() {
    public:
     BmpSnapshotHandler(ScreenMirrorComponent *parent) : parent_(parent) {}
     bool canHandle(AsyncWebServerRequest *request) const override {
-      return request->method() == HTTP_GET && request->url() == "/screenshot.bmp";
+      if (request->method() != HTTP_GET)
+        return false;
+      char url_buf[AsyncWebServerRequest::URL_BUF_SIZE];
+      return request->url_to(url_buf) == "/screenshot.bmp";
     }
     void handleRequest(AsyncWebServerRequest *request) override {
       const uint8_t *buffer = nullptr;
@@ -252,28 +250,16 @@ void ScreenMirrorComponent::setup() {
         return;
       }
 
-      static uint8_t header[54];
+      uint8_t header[54];
       this->parent_->build_bmp_header(width, height, header);
-      
       size_t image_bytes = width * height * 2;
-      AsyncWebServerResponse *response = request->beginResponse("image/bmp", sizeof(header) + image_bytes,
-        [this, buffer, image_bytes](uint8_t *data, size_t maxLen, size_t index) -> size_t {
-          if (index < sizeof(header)) {
-            size_t copy_header = std::min(maxLen, sizeof(header) - index);
-            std::memcpy(data, header + index, copy_header);
-            return copy_header;
-          }
-          size_t buf_index = index - sizeof(header);
-          if (buf_index < image_bytes) {
-            size_t copy_buf = std::min(maxLen, image_bytes - buf_index);
-            std::memcpy(data, buffer + buf_index, copy_buf);
-            return copy_buf;
-          }
-          return 0;
-        });
-      response->addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-      response->addHeader("Access-Control-Allow-Origin", "*");
-      request->send(response);
+
+      httpd_resp_set_type(*request, "image/bmp");
+      httpd_resp_set_hdr(*request, "Cache-Control", "no-cache, no-store, must-revalidate");
+      httpd_resp_set_hdr(*request, "Access-Control-Allow-Origin", "*");
+      httpd_resp_send_chunk(*request, reinterpret_cast<const char *>(header), sizeof(header));
+      httpd_resp_send_chunk(*request, reinterpret_cast<const char *>(buffer), image_bytes);
+      httpd_resp_send_chunk(*request, nullptr, 0);
     }
   };
 
@@ -284,7 +270,10 @@ void ScreenMirrorComponent::setup() {
    public:
     MirrorInfoHandler(ScreenMirrorComponent *parent) : parent_(parent) {}
     bool canHandle(AsyncWebServerRequest *request) const override {
-      return request->method() == HTTP_GET && request->url() == "/mirror/info";
+      if (request->method() != HTTP_GET)
+        return false;
+      char url_buf[AsyncWebServerRequest::URL_BUF_SIZE];
+      return request->url_to(url_buf) == "/mirror/info";
     }
     void handleRequest(AsyncWebServerRequest *request) override {
       char json[256];
@@ -307,18 +296,21 @@ void ScreenMirrorComponent::setup() {
    public:
     TapHandler(ScreenMirrorComponent *parent) : parent_(parent) {}
     bool canHandle(AsyncWebServerRequest *request) const override {
-      return (request->method() == HTTP_POST || request->method() == HTTP_GET) && request->url() == "/tap";
+      if (request->method() != HTTP_POST && request->method() != HTTP_GET)
+        return false;
+      char url_buf[AsyncWebServerRequest::URL_BUF_SIZE];
+      return request->url_to(url_buf) == "/tap";
     }
     void handleRequest(AsyncWebServerRequest *request) override {
       if (!request->hasParam("x") || !request->hasParam("y")) {
         request->send(400, "application/json", "{\"error\":\"Missing x or y parameters\"}");
         return;
       }
-      int x = request->getParam("x")->value().toInt();
-      int y = request->getParam("y")->value().toInt();
+      int x = std::atoi(request->getParam("x")->value().c_str());
+      int y = std::atoi(request->getParam("y")->value().c_str());
       uint16_t duration = 50;
       if (request->hasParam("duration")) {
-        duration = request->getParam("duration")->value().toInt();
+        duration = static_cast<uint16_t>(std::atoi(request->getParam("duration")->value().c_str()));
       }
 
       bool success = this->parent_->simulate_tap(x, y, duration);
@@ -337,10 +329,13 @@ void ScreenMirrorComponent::setup() {
    public:
     RemoteUiHandler(ScreenMirrorComponent *parent) : parent_(parent) {}
     bool canHandle(AsyncWebServerRequest *request) const override {
-      return request->method() == HTTP_GET && request->url() == this->parent_->web_path_;
+      if (request->method() != HTTP_GET)
+        return false;
+      char url_buf[AsyncWebServerRequest::URL_BUF_SIZE];
+      return request->url_to(url_buf) == this->parent_->web_path_;
     }
     void handleRequest(AsyncWebServerRequest *request) override {
-      AsyncWebServerResponse *response = request->beginResponse_P(200, "text/html", (const uint8_t *)REMOTE_HTML, sizeof(REMOTE_HTML) - 1);
+      AsyncWebServerResponse *response = request->beginResponse(200, "text/html", (const uint8_t *)REMOTE_HTML, sizeof(REMOTE_HTML) - 1);
       response->addHeader("Access-Control-Allow-Origin", "*");
       request->send(response);
     }
@@ -415,14 +410,12 @@ bool ScreenMirrorComponent::encode_jpeg(const uint8_t *rgb565_buffer, int width,
   cfg.src_type = JPEG_PIXEL_FORMAT_RGB565_LE;
   cfg.subsampling = JPEG_SUBSAMPLE_420;
   cfg.quality = this->jpeg_quality_;
-  cfg.task_enable = (this->core_ == 0);
-  if (cfg.task_enable) {
-    cfg.hfm_task_core = this->core_;
-  }
+  cfg.task_enable = false; // Mono-task mode: runs synchronously on current thread, ~10KB DRAM
 
   jpeg_enc_handle_t enc_handle = nullptr;
-  if (jpeg_enc_open(&cfg, &enc_handle) != JPEG_ERR_OK) {
-    ESP_LOGE(TAG, "jpeg_enc_open failed");
+  jpeg_error_t open_err = jpeg_enc_open(&cfg, &enc_handle);
+  if (open_err != JPEG_ERR_OK || enc_handle == nullptr) {
+    ESP_LOGE(TAG, "jpeg_enc_open failed: %d", open_err);
     return false;
   }
 
