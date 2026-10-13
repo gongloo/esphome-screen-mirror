@@ -56,5 +56,9 @@ async def to_code(config):
     cg.add(var.set_web_path(config[CONF_WEB_PATH]))
     cg.add(var.set_show_telemetry(config[CONF_SHOW_TELEMETRY]))
     cg.add(var.set_core(config[CONF_CORE]))
-
     cg.add_define("USE_SCREEN_MIRROR")
+
+    if CORE.is_esp32:
+        from esphome.components.esp32 import add_idf_component
+        add_idf_component(name="espressif/esp_new_jpeg", ref="^1.0.2")
+
