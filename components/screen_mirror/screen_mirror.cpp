@@ -6,6 +6,14 @@
 #include <esp_heap_caps.h>
 #include <esp_jpeg_enc.h>
 
+#if __has_include("esp_lcd_panel_rgb.h")
+#include <esp_lcd_panel_rgb.h>
+#endif
+
+#if __has_include("esphome/components/mipi_rgb/mipi_rgb.h")
+#include "esphome/components/mipi_rgb/mipi_rgb.h"
+#endif
+
 #if __has_include("lvgl.h")
 #define HAS_LVGL 1
 #include "lvgl.h"
@@ -371,30 +379,23 @@ bool ScreenMirrorComponent::capture_frame_rgb565(const uint8_t *&out_buffer, int
   width = this->display_->get_width();
   height = this->display_->get_height();
 
-#if defined(HAS_LVGL)
-  lv_obj_t *act_screen = lv_screen_active();
-  if (act_screen != nullptr) {
-    lv_draw_buf_t *snapshot = lv_snapshot_take(act_screen, LV_COLOR_FORMAT_RGB565);
-    if (snapshot != nullptr && snapshot->data != nullptr) {
-      width = snapshot->header.w;
-      height = snapshot->header.h;
-      size_t len = width * height * 2;
-      if (this->raw_buffer_ != nullptr && len <= this->raw_buffer_size_) {
-        std::memcpy(this->raw_buffer_, snapshot->data, len);
-        out_buffer = this->raw_buffer_;
-      } else {
-        out_buffer = (const uint8_t *) snapshot->data;
-      }
-      lv_draw_buf_destroy(snapshot);
+#if __has_include("esphome/components/mipi_rgb/mipi_rgb.h") && __has_include("esp_lcd_panel_rgb.h")
+  // For MIPI RGB panels, read the active hardware PSRAM scanout framebuffer
+  class MipiRgbAccessor : public esphome::mipi_rgb::MipiRgb {
+   public:
+    esp_lcd_panel_handle_t get_panel_handle() { return this->handle_; }
+    uint16_t *get_buffer() { return this->buffer_; }
+  };
+  auto *mipi = reinterpret_cast<MipiRgbAccessor *>(this->display_);
+  if (mipi != nullptr && mipi->get_panel_handle() != nullptr) {
+    void *fb = nullptr;
+    if (esp_lcd_rgb_panel_get_frame_buffer(mipi->get_panel_handle(), 1, &fb) == ESP_OK && fb != nullptr) {
+      out_buffer = reinterpret_cast<const uint8_t *>(fb);
       return true;
     }
   }
-#endif
-
-#if __has_include("esphome/components/display/display_buffer.h")
-  auto *disp_buf = dynamic_cast<esphome::display::DisplayBuffer *>(this->display_);
-  if (disp_buf != nullptr && disp_buf->get_buffer_() != nullptr) {
-    out_buffer = disp_buf->get_buffer_();
+  if (mipi != nullptr && mipi->get_buffer() != nullptr) {
+    out_buffer = reinterpret_cast<const uint8_t *>(mipi->get_buffer());
     return true;
   }
 #endif
@@ -410,7 +411,7 @@ bool ScreenMirrorComponent::encode_jpeg(const uint8_t *rgb565_buffer, int width,
   jpeg_enc_config_t cfg = DEFAULT_JPEG_ENC_CONFIG();
   cfg.width = width;
   cfg.height = height;
-  cfg.src_type = JPEG_PIXEL_FORMAT_RGB565;
+  cfg.src_type = JPEG_PIXEL_FORMAT_RGB565_LE;
   cfg.subsampling = JPEG_SUBSAMPLE_420;
   cfg.quality = this->jpeg_quality_;
   cfg.task_enable = (this->core_ == 0);
