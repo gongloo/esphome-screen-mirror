@@ -2,7 +2,6 @@ import logging
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.const import CONF_ID
-from esphome.core import CORE
 from esphome.components import display, touchscreen
 from esphome.components import web_server_base
 
@@ -24,6 +23,7 @@ CONF_SHOW_TELEMETRY = "show_telemetry"
 CONF_CORE = "core"
 
 CONFIG_SCHEMA = cv.All(
+    cv.only_on_esp32,
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(ScreenMirrorComponent),
@@ -36,7 +36,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_SHOW_TELEMETRY, default=True): cv.boolean,
             cv.Optional(CONF_CORE, default=0): cv.int_range(min=0, max=1),
         }
-    ).extend(cv.COMPONENT_SCHEMA)
+    ).extend(cv.COMPONENT_SCHEMA),
 )
 
 async def to_code(config):
@@ -56,9 +56,5 @@ async def to_code(config):
     cg.add(var.set_web_path(config[CONF_WEB_PATH]))
     cg.add(var.set_show_telemetry(config[CONF_SHOW_TELEMETRY]))
     cg.add(var.set_core(config[CONF_CORE]))
-
-    # If compiling under Arduino framework, pull JPEGENC from PlatformIO library registry
-    if CORE.is_esp32 and CORE.using_arduino:
-        cg.add_library("bitbank2/JPEGENC", "1.1.0")
 
     cg.add_define("USE_SCREEN_MIRROR")

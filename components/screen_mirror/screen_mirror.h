@@ -10,9 +10,6 @@
 
 #ifdef USE_WEBSERVER
 #include "esphome/components/web_server_base/web_server_base.h"
-#if !USE_ESP32
-#include <ESPAsyncWebServer.h>
-#endif
 #endif
 
 namespace esphome {

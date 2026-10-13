@@ -3,18 +3,8 @@
 #include <cstring>
 #include <algorithm>
 
-#if defined(USE_ESP32)
 #include <esp_heap_caps.h>
-#endif
-
-// Official Espressif Hardware SIMD Accelerated JPEG Encoder (via idf_component.yml)
-#if __has_include("esp_jpeg_enc.h")
-#define USE_ESP_NEW_JPEG 1
-#include "esp_jpeg_enc.h"
-#elif __has_include("JPEGENC.h")
-#define USE_JPEGENC 1
-#include "JPEGENC.h"
-#endif
+#include <esp_jpeg_enc.h>
 
 #if __has_include("lvgl.h")
 #define HAS_LVGL 1
@@ -169,7 +159,6 @@ void ScreenMirrorComponent::setup() {
   int h = (this->display_ != nullptr) ? this->display_->get_height() : 480;
 
   // Allocate dedicated PSRAM working buffers for zero runtime heap fragmentation
-#if defined(USE_ESP32)
   this->raw_buffer_size_ = w * h * 2;
   this->raw_buffer_ = (uint8_t *) heap_caps_malloc(this->raw_buffer_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (this->raw_buffer_ == nullptr) {
@@ -181,12 +170,6 @@ void ScreenMirrorComponent::setup() {
   if (this->jpeg_buffer_ == nullptr) {
     this->jpeg_buffer_ = (uint8_t *) malloc(this->jpeg_buffer_size_);
   }
-#else
-  this->raw_buffer_size_ = w * h * 2;
-  this->raw_buffer_ = (uint8_t *) malloc(this->raw_buffer_size_);
-  this->jpeg_buffer_size_ = 128 * 1024;
-  this->jpeg_buffer_ = (uint8_t *) malloc(this->jpeg_buffer_size_);
-#endif
 
   if (this->jpeg_buffer_ == nullptr) {
     ESP_LOGE(TAG, "Failed to allocate JPEG working buffer!");
@@ -424,7 +407,6 @@ bool ScreenMirrorComponent::encode_jpeg(const uint8_t *rgb565_buffer, int width,
   if (rgb565_buffer == nullptr || out_jpeg == nullptr || width <= 0 || height <= 0)
     return false;
 
-#if defined(USE_ESP_NEW_JPEG)
   jpeg_enc_config_t cfg = DEFAULT_JPEG_ENC_CONFIG();
   cfg.width = width;
   cfg.height = height;
@@ -455,48 +437,6 @@ bool ScreenMirrorComponent::encode_jpeg(const uint8_t *rgb565_buffer, int width,
 
   out_size = (size_t) out_len;
   return (out_size > 0);
-
-#elif defined(USE_JPEGENC)
-  JPEGENC encoder;
-  int rc = encoder.open(out_jpeg, (int)this->jpeg_buffer_size_);
-  if (rc != JPEGE_SUCCESS) {
-    ESP_LOGE(TAG, "JPEGENC open failed with error: %d", rc);
-    return false;
-  }
-
-  uint8_t q_factor = JPEGE_Q_HIGH;
-  if (this->jpeg_quality_ >= 85) {
-    q_factor = JPEGE_Q_BEST;
-  } else if (this->jpeg_quality_ >= 65) {
-    q_factor = JPEGE_Q_HIGH;
-  } else if (this->jpeg_quality_ >= 40) {
-    q_factor = JPEGE_Q_MED;
-  } else {
-    q_factor = JPEGE_Q_LOW;
-  }
-
-  JPEGENCODE encode;
-  rc = encoder.encodeBegin(&encode, width, height, JPEGE_PIXEL_RGB565, JPEGE_SUBSAMPLE_420, q_factor);
-  if (rc != JPEGE_SUCCESS) {
-    ESP_LOGE(TAG, "JPEGENC encodeBegin failed with error: %d", rc);
-    encoder.close();
-    return false;
-  }
-
-  rc = encoder.addFrame(&encode, const_cast<uint8_t *>(rgb565_buffer), width * 2);
-  if (rc != JPEGE_SUCCESS) {
-    ESP_LOGE(TAG, "JPEGENC addFrame failed with error: %d", rc);
-    encoder.close();
-    return false;
-  }
-
-  out_size = (size_t) encoder.close();
-  return (out_size > 0);
-
-#else
-  ESP_LOGE(TAG, "No JPEG encoder library available");
-  return false;
-#endif
 }
 
 bool ScreenMirrorComponent::build_bmp_header(int width, int height, uint8_t *header_54) {
