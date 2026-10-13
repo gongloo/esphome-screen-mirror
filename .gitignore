@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.venv
+venv/
+
+# ESPHome & PlatformIO Build artifacts
+.esphome/
+build/
+.pio/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
