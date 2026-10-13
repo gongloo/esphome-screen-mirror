@@ -8,7 +8,7 @@ from esphome.components import web_server_base
 _LOGGER = logging.getLogger(__name__)
 
 CODEOWNERS = ["@gongloo"]
-DEPENDENCIES = ["web_server_base"]
+AUTO_LOAD = ["web_server_base"]
 
 screen_mirror_ns = cg.esphome_ns.namespace("screen_mirror")
 ScreenMirrorComponent = screen_mirror_ns.class_("ScreenMirrorComponent", cg.Component)
