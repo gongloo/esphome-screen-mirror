@@ -8,9 +8,7 @@
 #include "esphome/components/touchscreen/touchscreen.h"
 #endif
 
-#ifdef USE_WEBSERVER
 #include "esphome/components/web_server_base/web_server_base.h"
-#endif
 
 namespace esphome {
 namespace screen_mirror {

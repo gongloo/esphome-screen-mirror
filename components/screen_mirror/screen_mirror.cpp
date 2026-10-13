@@ -198,7 +198,6 @@ void ScreenMirrorComponent::setup() {
   }
 #endif
 
-#ifdef USE_WEBSERVER
   if (web_server_base::global_web_server_base == nullptr) {
     ESP_LOGW(TAG, "No web_server_base registered; remote endpoints will be unavailable.");
     return;
@@ -354,9 +353,11 @@ void ScreenMirrorComponent::setup() {
   web_server_base::global_web_server_base->add_handler(new TapHandler(this));
   web_server_base::global_web_server_base->add_handler(new RemoteUiHandler(this));
 
+  // Initialize web_server_base to ensure the HTTP server is listening on port 80
+  web_server_base::global_web_server_base->init();
+
   ESP_LOGI(TAG, "Screen mirror endpoints active at: %s, /screenshot.jpg, /screenshot.bmp, /tap",
            this->web_path_.c_str());
-#endif
 }
 
 void ScreenMirrorComponent::loop() {
