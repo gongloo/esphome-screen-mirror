@@ -15,6 +15,8 @@
 #endif
 #endif
 
+#include "JPEGENC.h"
+
 namespace esphome {
 namespace screen_mirror {
 
@@ -38,13 +40,17 @@ class ScreenMirrorComponent : public Component {
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
 
-  // Snapshot generation helpers
+  // Frame capture and encoding APIs
   bool capture_frame_rgb565(const uint8_t *&out_buffer, int &width, int &height);
-  bool encode_jpeg(const uint8_t *rgb565_buffer, int width, int height, uint8_t **out_jpeg, size_t *out_size);
+  bool encode_jpeg(const uint8_t *rgb565_buffer, int width, int height, uint8_t *out_jpeg, size_t &out_size);
   bool build_bmp_header(int width, int height, uint8_t *header_54);
 
-  // Simulated touch helper
+  // Input simulation APIs
   bool simulate_tap(int x, int y, uint16_t duration_ms = 50);
+
+  // Buffer accessors
+  uint8_t *get_jpeg_buffer() { return this->jpeg_buffer_; }
+  size_t get_jpeg_buffer_size() const { return this->jpeg_buffer_size_; }
 
  protected:
   display::Display *display_{nullptr};
@@ -58,10 +64,19 @@ class ScreenMirrorComponent : public Component {
   bool show_telemetry_{true};
   uint8_t core_{0};
 
+  // Dedicated PSRAM buffers for zero-fragmentation encoding
+  uint8_t *raw_buffer_{nullptr};
+  size_t raw_buffer_size_{0};
+  uint8_t *jpeg_buffer_{nullptr};
+  size_t jpeg_buffer_size_{0};
+
   // State tracking
   bool dirty_{true};
   uint32_t last_frame_time_{0};
   uint32_t frame_count_{0};
+
+  // JPEG Encoder instance
+  JPEGENC encoder_{};
 };
 
 }  // namespace screen_mirror
