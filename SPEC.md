@@ -80,10 +80,11 @@ To ensure compatibility across hardware, `esphome-screen-mirror` implements a un
 
 ### 5. Technical & Performance Requirements
 
-#### 5.1 Hardware Targets
+#### 5.1 Hardware & Framework Targets
 
+- **Framework:** **ESP-IDF only** (`framework: type: esp-idf`). The component is built exclusively around Espressif's native `espressif/esp_new_jpeg` codec and the ESP-IDF Component Manager. The Arduino framework is not supported.
 - **Primary Tier (High Performance):** ESP32-S3 with Octal PSRAM (CrowPanel 5.0", Sunton 800×480) using `esp-idf` framework.
-- **Secondary Tier:** Standard ESP32 (WROVER / WROOM) with SPI displays (`ili9xxx`, `st7789v`).
+- **Secondary Tier:** Standard ESP32 (WROVER / WROOM) with SPI displays (`ili9xxx`, `st7789v`) under `esp-idf`.
 
 #### 5.2 Performance Constraints
 
