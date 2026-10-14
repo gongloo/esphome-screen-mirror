@@ -48,15 +48,14 @@ To ensure compatibility across hardware, `esphome-screen-mirror` implements a un
 - **REQ-CAP-1 (Static JPEG):** Expose `GET /screenshot.jpg` (or `/screenshot.jpeg`) serving a single JPEG-encoded frame of the current screen.
   - Query parameters: `?quality=1-100` (default 75), `?scale=1|2`.
 - **REQ-CAP-2 (Static BMP Fallback):** Expose `GET /screenshot.bmp` returning uncompressed RGB565/RGB888 BMP for pixel-perfect debugging and minimal CPU overhead.
-- **REQ-CAP-3 (Gated MJPEG Stream):** Expose `GET /stream.mjpeg` serving an HTTP multipart MJPEG stream.
-  - **Dirty Frame Gating:** Only encode and push a frame if LVGL or the display driver flags an area as dirty, or upon input events. If the display is static, transmission drops to **0 FPS / 0 KB/s** to preserve CPU and Wi-Fi airtime.
-- **REQ-CAP-4 (Dirty Tile Blitting):** Expose a WebSocket endpoint (or chunked binary stream) for partial-frame streaming:
+- **Architectural Decision (MJPEG Deprecation):** Continuous HTTP multipart MJPEG streaming (`/stream.mjpeg`) was evaluated and deprecated. Because the ESP-IDF `httpd` daemon runs on a single FreeRTOS worker thread, a persistent multipart HTTP connection starves all other HTTP requests (e.g. concurrent `/tap`, `/remote`, or other web endpoints). Instead, real-time live preview is accomplished via client-adaptive snapshot polling (`/screenshot.jpg`) and asynchronous WebSockets (Phase 4).
+- **REQ-CAP-3 (Dirty Tile Blitting via WebSockets):** Expose a WebSocket endpoint for partial-frame delta streaming:
   - Transmits binary packets containing bounding boxes `[x, y, w, h]` and JPEG-encoded tiles.
-  - Client blits tiles onto an HTML5 `<canvas>` via `ctx.drawImage()`, reducing bandwidth to 1–5 KB/s for minor UI updates.
-- **REQ-CAP-5 (Metadata Endpoint):** Expose `GET /mirror/info` returning JSON:
+  - Client blits tiles onto an HTML5 `<canvas>` via `ctx.drawImage()`, reducing bandwidth to 1–5 KB/s for minor UI updates without blocking the HTTP server thread.
+- **REQ-CAP-4 (Metadata Endpoint):** Expose `GET /mirror/info` returning JSON:
   - Screen dimensions (`width`, `height`, `rotation`)
   - Active display driver, color format, and adapter type
-  - Connected client count and memory statistics
+  - Memory statistics and telemetry
 
 #### 4.2 Input Simulation
 
@@ -72,8 +71,8 @@ To ensure compatibility across hardware, `esphome-screen-mirror` implements a un
 - **REQ-WEB-1 (Self-Contained Page):** Serve a responsive single-page application at `GET /remote` (or `/mirror`).
 - **REQ-WEB-2 (Zero External CDN):** 100% offline-capable; no external fonts, CSS, or JS libraries.
 - **REQ-WEB-3 (Interactive Canvas / Image):**
-  - Renders the Gated MJPEG stream (MVP) or HTML5 `<canvas>` with Tile Blitting (Phase 4).
-  - Automatically translates browser mouse/touch clicks to native device coordinates `(800x480)` regardless of window size.
+  - Renders the live mirror via adaptive frame refresh or HTML5 `<canvas>` Tile Blitting.
+  - Automatically translates browser mouse/touch clicks to native device coordinates `(800x480)` regardless of window size and screen rotation.
   - Shows visual touch feedback (ripple or crosshair) at the clicked position.
 - **REQ-WEB-4 (Device Telemetry Bar):** Display live overlay (FPS, encode latency, free PSRAM/heap, Wi-Fi RSSI).
 
@@ -132,6 +131,6 @@ screen_mirror:
 | Phase       | Milestone                                      | Deliverables                                                                                                                                                                                    |
 | :---------- | :--------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Phase 1** | **Core JPEG & Snapshot API**                   | - Integrate SIMD-accelerated `JPEGENC` / `esp_jpeg`.<br>- Implement `mipi_rgb` & LVGL 9 frame grabber.<br>- Working `GET /screenshot.jpg` and `GET /screenshot.bmp`.                            |
-| **Phase 2** | **Touch Input Injection**                      | - Implement `POST /tap?x=..&y=..`.<br>- Direct injection into LVGL 9 `lv_indev` or virtual touchscreen.<br>- Automated Python test script for tap verification.                                 |
-| **Phase 3** | **Strategy B: Gated MJPEG & Web UI**           | - Streaming `GET /stream.mjpeg` with **Dirty Frame Gating** (0 FPS when idle).<br>- Embedded HTML5/JS Web Mirror at `/remote`.<br>- Click-to-tap interactive mirroring with coordinate scaling. |
-| **Phase 4** | **DisplayBuffer & Strategy C (Tile Blitting)** | - Add `DisplayBuffer` adapter (ST7789, ILI9341, OLEDs).<br>- HTML5 `<canvas>` WebSocket tile blitting for sub-frame updates.<br>- Documentation, repository release, and CI validation.         |
+| **Phase 2** | **Touch Input Injection & Web Mirror UI**      | - Implement `POST /tap?x=..&y=..` routed via ESPHome Touchscreen subsystem.<br>- Embedded HTML5/JS Web Mirror at `/remote` with gzip asset embedding and auto-rotation.<br>- Coordinate scaling and click-to-tap feedback. |
+| **Phase 3** | **Swipe & Drag Gestures**                      | - Implement `POST /swipe` with start/end coordinates and duration.<br>- Continuous touch drag gestures for scrolling and sliders.<br>- Web Mirror mouse drag and touch swipe support.       |
+| **Phase 4** | **DisplayBuffer & Strategy C (Tile Blitting)** | - Add `DisplayBuffer` adapter (ST7789, ILI9341, OLEDs).<br>- Asynchronous WebSocket tile blitting for sub-frame delta updates.<br>- Documentation, repository release, and CI validation.   |

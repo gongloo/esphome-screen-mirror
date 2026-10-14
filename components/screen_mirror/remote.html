@@ -45,7 +45,7 @@
     <div class="badge">Device: <span id="res">-</span></div>
     <div class="badge">Orientation: <span id="rot">0°</span></div>
     <div class="badge">Latency: <span id="lat">-</span> ms</div>
-    <div class="badge">Mode: <span id="mode" style="color: #10b981">Fast Refresh</span></div>
+    <div class="badge">Mode: <span id="mode" style="color: #10b981">Live Mirror</span></div>
     <div class="badge">Status: <span id="stat" style="color: #10b981">Connected</span></div>
   </div>
   <div class="screen-container" id="container">
@@ -53,9 +53,7 @@
   </div>
   <div class="status">Click or tap anywhere on the screen to simulate touch</div>
   <div class="btn-group">
-    <button id="toggleBtn" onclick="toggleStreamMode()">Switch to Live MJPEG</button>
     <button onclick="refreshScreen(true)">Snapshot (Refresh)</button>
-    <button onclick="window.open('/stream.mjpeg', '_blank')">Live Stream</button>
     <button onclick="window.open('/screenshot.jpg', '_blank')">Full JPEG</button>
     <button onclick="window.open('/screenshot.bmp', '_blank')">Raw BMP</button>
   </div>
@@ -90,64 +88,17 @@
     }
     updateInfo();
 
-    let isLiveStream = false; // Snapshot polling by default to maintain responsive httpd
-    let pollInterval = null;
-    let streamImg = null;
-    let isStreamingLoop = false;
-
     function initStream() {
-      if (isLiveStream) {
-        if (pollInterval) clearInterval(pollInterval);
-        isStreamingLoop = false;
-        streamImg = new Image();
-        streamImg.src = '/stream.mjpeg';
-        let lastFrameTime = performance.now();
-        const renderLoop = () => {
-          if (!isLiveStream) return;
-          if (streamImg.complete && streamImg.naturalWidth > 0) {
-            drawRotated(streamImg);
-            const now = performance.now();
-            latSpan.textContent = Math.round(now - lastFrameTime);
-            lastFrameTime = now;
-          }
-          requestAnimationFrame(renderLoop);
-        };
-        requestAnimationFrame(renderLoop);
-      } else {
-        if (streamImg) {
-          streamImg.src = '';
-          streamImg = null;
-        }
-        startContinuousPolling();
-      }
+      startContinuousPolling();
     }
 
     function startContinuousPolling() {
-      if (pollInterval) clearInterval(pollInterval);
-      let running = true;
       const pollNext = async () => {
-        if (isLiveStream) return;
         await refreshScreen(false);
         // Schedule next frame with minimal delay (adaptive FPS)
         setTimeout(() => requestAnimationFrame(pollNext), 50);
       };
       pollNext();
-    }
-
-    function toggleStreamMode() {
-      isLiveStream = !isLiveStream;
-      const modeSpan = document.getElementById('mode');
-      const toggleBtn = document.getElementById('toggleBtn');
-      if (isLiveStream) {
-        modeSpan.textContent = 'Live MJPEG';
-        modeSpan.style.color = '#38bdf8';
-        toggleBtn.textContent = 'Switch to Fast Refresh';
-      } else {
-        modeSpan.textContent = 'Fast Refresh';
-        modeSpan.style.color = '#10b981';
-        toggleBtn.textContent = 'Switch to Live MJPEG';
-      }
-      initStream();
     }
 
     async function refreshScreen(manual = false) {
@@ -237,9 +188,7 @@
 
       try {
         await fetch(`/tap?x=${rawX}&y=${rawY}`, { method: 'POST', body: '' });
-        if (!isLiveStream) {
-          setTimeout(() => refreshScreen(true), 120);
-        }
+        setTimeout(() => refreshScreen(true), 120);
       } catch (err) {
         console.error(err);
       }

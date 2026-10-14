@@ -187,102 +187,7 @@ void ScreenMirrorComponent::setup() {
     }
   };
 
-  // 5. Gated MJPEG Stream Handler (/stream.mjpeg)
-  class MjpegStreamHandler : public AsyncWebHandler {
-   protected:
-    ScreenMirrorComponent *parent_;
-   public:
-    MjpegStreamHandler(ScreenMirrorComponent *parent) : parent_(parent) {}
-    bool canHandle(AsyncWebServerRequest *request) const override {
-      if (request->method() != HTTP_GET)
-        return false;
-      char url_buf[AsyncWebServerRequest::URL_BUF_SIZE];
-      return request->url_to(url_buf) == "/stream.mjpeg";
-    }
-    void handleRequest(AsyncWebServerRequest *request) override {
-      httpd_req_t *req = *request;
-      static const char *const BOUNDARY = "esphome_screen_mirror_frame";
-
-      // Set multipart header
-      char head[256];
-      snprintf(head, sizeof(head),
-               "multipart/x-mixed-replace;boundary=%s", BOUNDARY);
-      httpd_resp_set_type(req, head);
-      httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
-      httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-      httpd_resp_set_hdr(req, "Connection", "close");
-
-      // Initial boundary
-      char initial_boundary[64];
-      snprintf(initial_boundary, sizeof(initial_boundary), "--%s\r\n", BOUNDARY);
-      if (httpd_resp_send_chunk(req, initial_boundary, strlen(initial_boundary)) != ESP_OK) {
-        return;
-      }
-
-      this->parent_->active_streams_++;
-      ESP_LOGI(TAG, "MJPEG client connected (active: %u)", (unsigned) this->parent_->active_streams_.load());
-
-      uint32_t interval_ms = (this->parent_->fps_ > 0.05f) ? static_cast<uint32_t>(1000.0f / this->parent_->fps_) : 1000;
-      uint32_t last_send = 0;
-      char part_header[128];
-      char end_boundary[64];
-      snprintf(end_boundary, sizeof(end_boundary), "\r\n--%s\r\n", BOUNDARY);
-
-      uint32_t stream_start = millis();
-      // Stream for up to 300 seconds (or until client closes / disconnects) to prevent permanent socket starvation
-      static constexpr uint32_t MAX_STREAM_DURATION_MS = 300000;
-
-      while (millis() - stream_start < MAX_STREAM_DURATION_MS) {
-        uint32_t now = millis();
-
-        // If gated streaming is enabled and frame isn't marked dirty, sleep and yield
-        if (this->parent_->gated_streaming_ && !this->parent_->dirty_) {
-          vTaskDelay(pdMS_TO_TICKS(50));
-          continue;
-        }
-
-        if (now - last_send >= interval_ms) {
-          const uint8_t *raw_buf = nullptr;
-          int width = 0, height = 0;
-
-          if (this->parent_->capture_frame_rgb565(raw_buf, width, height) && raw_buf != nullptr) {
-            uint8_t *out_jpeg = this->parent_->get_jpeg_buffer();
-            size_t out_size = 0;
-
-            if (this->parent_->encode_jpeg(raw_buf, width, height, out_jpeg, out_size) && out_size > 0) {
-              snprintf(part_header, sizeof(part_header),
-                       "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", (unsigned) out_size);
-
-              esp_err_t err = httpd_resp_send_chunk(req, part_header, strlen(part_header));
-              if (err == ESP_OK) {
-                err = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(out_jpeg), out_size);
-              }
-              if (err == ESP_OK) {
-                err = httpd_resp_send_chunk(req, end_boundary, strlen(end_boundary));
-              }
-
-              if (err != ESP_OK) {
-                // Client disconnected or socket broken
-                break;
-              }
-
-              last_send = now;
-              this->parent_->dirty_ = false;
-            }
-          }
-        }
-
-        // Yield explicitly to feed FreeRTOS watchdog & allow other tasks to run
-        vTaskDelay(pdMS_TO_TICKS(20));
-      }
-
-      this->parent_->active_streams_--;
-      ESP_LOGI(TAG, "MJPEG client disconnected (active: %u)", (unsigned) this->parent_->active_streams_.load());
-      httpd_resp_send_chunk(req, nullptr, 0);
-    }
-  };
-
-  // 6. Embedded Web Mirror UI (/remote)
+  // 5. Embedded Web Mirror UI (/remote)
   class RemoteUiHandler : public AsyncWebHandler {
    protected:
     ScreenMirrorComponent *parent_;
@@ -310,7 +215,6 @@ void ScreenMirrorComponent::setup() {
   // Register all endpoints
   web_server_base::global_web_server_base->add_handler(new JpegSnapshotHandler(this));
   web_server_base::global_web_server_base->add_handler(new BmpSnapshotHandler(this));
-  web_server_base::global_web_server_base->add_handler(new MjpegStreamHandler(this));
   web_server_base::global_web_server_base->add_handler(new MirrorInfoHandler(this));
   web_server_base::global_web_server_base->add_handler(new TapHandler(this));
   web_server_base::global_web_server_base->add_handler(new RemoteUiHandler(this));
@@ -318,7 +222,7 @@ void ScreenMirrorComponent::setup() {
   // Initialize web_server_base to ensure the HTTP server is listening on port 80
   web_server_base::global_web_server_base->init();
 
-  ESP_LOGI(TAG, "Screen mirror endpoints active at: %s, /screenshot.jpg, /screenshot.bmp, /stream.mjpeg, /tap",
+  ESP_LOGI(TAG, "Screen mirror endpoints active at: %s, /screenshot.jpg, /screenshot.bmp, /tap",
            this->web_path_.c_str());
 }
 

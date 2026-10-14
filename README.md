@@ -66,12 +66,12 @@ screen_mirror:
 
 ## Roadmap & Upcoming Features
 
-- [x] Phase 1: Core JPEG (`/screenshot.jpg`) and BMP (`/screenshot.bmp`) capture.
+- [x] Phase 1: Hardware-accelerated JPEG (`/screenshot.jpg`) and BMP (`/screenshot.bmp`) capture.
 - [x] Phase 2: Touch input simulation (`POST /tap`) via ESPHome `Touchscreen` subsystem.
 - [x] Phase 2.5: Interactive web UI (`/remote`) with auto-rotation, coordinate transformation, and build-time gzip asset embedding.
-- [ ] Phase 3: Continuous multipart MJPEG streaming (`GET /stream.mjpeg`) with dirty-frame gating.
-- [ ] Phase 4: Swipe & drag gestures (`POST /swipe`, continuous touch events).
-- [ ] Phase 5: Tile-based delta blitting via WebSockets for ultra-low bandwidth streaming.
+- [ ] Phase 3: Swipe & drag gestures (`POST /swipe`, continuous touch dragging).
+- [ ] Phase 4: Tile-based delta blitting via WebSockets for ultra-low bandwidth streaming.
+- [ ] Phase 5: Multi-display & extended peripheral support.
 
 For the comprehensive architectural specification, see [SPEC.md](SPEC.md).
 

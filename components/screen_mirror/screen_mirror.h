@@ -70,7 +70,6 @@ class ScreenMirrorComponent : public Component {
 
   // State tracking
   std::atomic<bool> dirty_{true};
-  std::atomic<uint32_t> active_streams_{0};
   uint32_t last_frame_time_{0};
   uint32_t frame_count_{0};
 };
