@@ -43,16 +43,22 @@ class ScreenMirrorComponent : public Component {
   bool build_bmp_header(int width, int height, uint8_t *header_54);
 
   // Input simulation APIs
-  bool simulate_tap(int x, int y, uint16_t duration_ms = 50);
+  bool simulate_tap(int x, int y, uint16_t duration_ms = 180);
   bool simulate_touch(int x, int y, const std::string &action); // "down", "move", "up"
   bool simulate_swipe(int start_x, int start_y, int end_x, int end_y, uint16_t duration_ms = 300);
   void mark_dirty() { this->dirty_ = true; }
+
+#if defined(USE_ESP32) && defined(CONFIG_HTTPD_WS_SUPPORT)
+  static esp_err_t ws_handler(httpd_req_t *req);
+#endif
 
   // Buffer accessors
   uint8_t *get_jpeg_buffer() { return this->jpeg_buffer_; }
   size_t get_jpeg_buffer_size() const { return this->jpeg_buffer_size_; }
 
  protected:
+  void release_touch_();
+
   display::Display *display_{nullptr};
 #ifdef USE_TOUCHSCREEN
   touchscreen::Touchscreen *touchscreen_{nullptr};
@@ -85,6 +91,9 @@ class ScreenMirrorComponent : public Component {
   // State tracking
   std::atomic<bool> dirty_{true};
   bool is_touch_down_{false};
+  uint32_t last_touch_down_time_{0};
+  int last_touch_x_{0};
+  int last_touch_y_{0};
   uint32_t last_frame_time_{0};
   uint32_t frame_count_{0};
 };

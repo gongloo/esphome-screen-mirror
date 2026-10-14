@@ -217,8 +217,10 @@ constexpr size_t REMOTE_HTML_GZ_SIZE = {len(gzipped)};
         f.write(header_content)
 
     if CORE.is_esp32:
-        from esphome.components.esp32 import add_idf_component
+        from esphome.components.esp32 import add_idf_component, add_idf_sdkconfig_option
         add_idf_component(name="espressif/esp_new_jpeg", ref="^1.0.2")
+        if CORE.using_toolchain_esp_idf or CORE.target_framework == "esp-idf":
+            add_idf_sdkconfig_option("CONFIG_HTTPD_WS_SUPPORT", True)
 
 
 

@@ -92,27 +92,38 @@
       startContinuousPolling();
     }
 
-    function startContinuousPolling() {
-      const pollNext = async () => {
-        await refreshScreen(false);
-        // Schedule next frame with minimal delay (adaptive FPS)
-        setTimeout(() => requestAnimationFrame(pollNext), 50);
-      };
-      pollNext();
+    let lastRenderedTime = 0;
+    let pollingActive = true;
+
+    function refreshScreen(manual = false) {
+      if (isRefreshing && !manual) return Promise.resolve();
+      isRefreshing = true;
+      const reqTime = performance.now();
+      return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          if (reqTime >= lastRenderedTime) {
+            lastRenderedTime = reqTime;
+            latSpan.textContent = Math.round(performance.now() - reqTime);
+            drawRotated(img);
+          }
+          isRefreshing = false;
+          resolve();
+        };
+        img.onerror = () => {
+          isRefreshing = false;
+          resolve();
+        };
+        img.src = '/screenshot.jpg?t=' + Date.now();
+      });
     }
 
-    async function refreshScreen(manual = false) {
-      if (isRefreshing && !manual) return;
-      isRefreshing = true;
-      const start = performance.now();
-      const img = new Image();
-      img.src = '/screenshot.jpg?t=' + Date.now();
-      img.onload = () => {
-        latSpan.textContent = Math.round(performance.now() - start);
-        drawRotated(img);
-        isRefreshing = false;
-      };
-      img.onerror = () => { isRefreshing = false; };
+    async function startContinuousPolling() {
+      while (pollingActive) {
+        await refreshScreen(false);
+        // Rest at least 120ms between frames so ESP32 HTTP worker thread is not saturated
+        await new Promise((r) => setTimeout(r, 120));
+      }
     }
 
     function drawRotated(img) {
@@ -186,59 +197,147 @@
       setTimeout(() => ripple.remove(), 400);
     }
 
-    let isPointerDown = false;
-    let pointerMoved = false;
-    let pointerStartTime = 0;
-    let lastMoveSent = 0;
+    let ws = null;
+    let wsConnected = false;
 
-    async function sendTouch(rawX, rawY, action) {
+    function initWebSocket() {
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${location.host}/ws`;
       try {
-        await fetch(`/touch?x=${rawX}&y=${rawY}&action=${action}`, { method: 'POST', body: '' });
+        ws = new WebSocket(wsUrl);
+        ws.onopen = () => {
+          wsConnected = true;
+          const stat = document.getElementById('stat');
+          if (stat) stat.textContent = 'WS Connected';
+        };
+        ws.onclose = () => {
+          wsConnected = false;
+          const stat = document.getElementById('stat');
+          if (stat) stat.textContent = 'HTTP Fallback';
+          setTimeout(initWebSocket, 2000);
+        };
+        ws.onerror = () => {
+          wsConnected = false;
+          ws.close();
+        };
+      } catch (e) {
+        wsConnected = false;
+      }
+    }
+
+    function sendTouch(rawX, rawY, action) {
+      if (wsConnected && ws && ws.readyState === WebSocket.OPEN) {
+        if (action === 'tap') {
+          ws.send(`T ${rawX} ${rawY}`);
+        } else if (action === 'down') {
+          ws.send(`D ${rawX} ${rawY}`);
+        } else if (action === 'move') {
+          ws.send(`M ${rawX} ${rawY}`);
+        } else if (action === 'up') {
+          ws.send(`U ${rawX} ${rawY}`);
+        }
+        return;
+      }
+
+      // Graceful fallback to HTTP POST
+      try {
+        if (action === 'tap') {
+          fetch(`/tap?x=${rawX}&y=${rawY}&duration=180`, { method: 'POST', body: '' });
+        } else {
+          fetch(`/touch?x=${rawX}&y=${rawY}&action=${action}`, { method: 'POST', body: '' });
+        }
       } catch (err) {
         console.error('Touch error:', err);
       }
     }
 
-    canvas.addEventListener('pointerdown', async (e) => {
+    let isPointerDown = false;
+    let pointerMoved = false;
+    let downSent = false;
+    let pointerStartTime = 0;
+    let lastMoveSent = 0;
+    let startRawX = 0;
+    let startRawY = 0;
+    let holdTimer = null;
+
+    canvas.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       canvas.setPointerCapture(e.pointerId);
       isPointerDown = true;
       pointerMoved = false;
+      downSent = false;
       pointerStartTime = performance.now();
       lastMoveSent = performance.now();
 
       const { clickX, clickY, rawX, rawY } = clientToRaw(e.clientX, e.clientY);
+      startRawX = rawX;
+      startRawY = rawY;
       showRipple(clickX, clickY);
-      await sendTouch(rawX, rawY, 'down');
+
+      // If user holds down without moving for > 250ms, initiate hold/drag on device
+      if (holdTimer) clearTimeout(holdTimer);
+      holdTimer = setTimeout(() => {
+        if (isPointerDown && !downSent) {
+          downSent = true;
+          sendTouch(startRawX, startRawY, 'down');
+        }
+      }, 250);
     });
 
-    canvas.addEventListener('pointermove', async (e) => {
+    canvas.addEventListener('pointermove', (e) => {
       if (!isPointerDown) return;
       e.preventDefault();
-      pointerMoved = true;
-      const now = performance.now();
-      // Throttle movement events to ~30ms to prevent network congestion
-      if (now - lastMoveSent >= 30) {
-        lastMoveSent = now;
-        const { rawX, rawY } = clientToRaw(e.clientX, e.clientY);
-        await sendTouch(rawX, rawY, 'move');
+      const { rawX, rawY } = clientToRaw(e.clientX, e.clientY);
+      const dist = Math.hypot(rawX - startRawX, rawY - startRawY);
+
+      // Movement threshold: once moved more than 6px, treat as drag
+      if (!pointerMoved && dist > 6) {
+        pointerMoved = true;
+        if (!downSent) {
+          if (holdTimer) clearTimeout(holdTimer);
+          downSent = true;
+          sendTouch(startRawX, startRawY, 'down');
+        }
+      }
+
+      if (downSent) {
+        const now = performance.now();
+        // Throttle movement events to ~20ms (50Hz) for smooth real-time drag
+        if (now - lastMoveSent >= 20) {
+          lastMoveSent = now;
+          sendTouch(rawX, rawY, 'move');
+        }
       }
     });
 
-    const handlePointerUp = async (e) => {
+    const handlePointerUp = (e) => {
       if (!isPointerDown) return;
       e.preventDefault();
       isPointerDown = false;
+      if (holdTimer) clearTimeout(holdTimer);
       try { canvas.releasePointerCapture(e.pointerId); } catch (err) {}
 
       const { rawX, rawY } = clientToRaw(e.clientX, e.clientY);
-      await sendTouch(rawX, rawY, 'up');
-      setTimeout(() => refreshScreen(true), 120);
+      const duration = performance.now() - pointerStartTime;
+
+      if (!downSent && !pointerMoved && duration < 350) {
+        // Crisp single tap/click: tell the device to perform simulated tap (180ms)
+        sendTouch(rawX, rawY, 'tap');
+      } else {
+        if (!downSent) {
+          // If down was never sent (e.g. released just before hold timer without movement)
+          sendTouch(startRawX, startRawY, 'down');
+        }
+        sendTouch(rawX, rawY, 'up');
+      }
+
+      setTimeout(() => refreshScreen(true), 200);
     };
 
     canvas.addEventListener('pointerup', handlePointerUp);
     canvas.addEventListener('pointercancel', handlePointerUp);
 
+    initWebSocket();
     initStream();
   </script>
 </body>

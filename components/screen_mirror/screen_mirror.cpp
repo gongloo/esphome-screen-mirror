@@ -301,9 +301,117 @@ void ScreenMirrorComponent::setup() {
   // Initialize web_server_base to ensure the HTTP server is listening on port 80
   web_server_base::global_web_server_base->init();
 
-  ESP_LOGI(TAG, "Screen mirror endpoints active at: %s, /screenshot.jpg, /screenshot.bmp, /tap, /touch, /swipe",
+#if defined(USE_ESP32) && defined(CONFIG_HTTPD_WS_SUPPORT)
+  auto *server = web_server_base::global_web_server_base->get_server();
+  if (server != nullptr && server->get_server() != nullptr) {
+    httpd_handle_t hd = server->get_server();
+
+    // Struct matching internal httpd_data up to uri_match_fn to chain matching
+    struct CustomHttpdData {
+      httpd_config_t config;
+    };
+    auto *data = reinterpret_cast<CustomHttpdData *>(hd);
+    data->config.uri_match_fn = [](const char *reference_uri, const char *uri_to_match, size_t match_len) -> bool {
+      // If the incoming request is for /ws, only match the handler specifically registered for /ws
+      if (match_len == 3 && strncmp(uri_to_match, "/ws", 3) == 0) {
+        return (reference_uri != nullptr && strcmp(reference_uri, "/ws") == 0);
+      }
+      if (reference_uri != nullptr && strlen(reference_uri) > 0) {
+        return (strncmp(reference_uri, uri_to_match, match_len) == 0 &&
+                strlen(reference_uri) == match_len);
+      }
+      return true;
+    };
+
+    httpd_uri_t ws_uri = {
+      .uri = "/ws",
+      .method = HTTP_GET,
+      .handler = ScreenMirrorComponent::ws_handler,
+      .user_ctx = this,
+      .is_websocket = true,
+      .handle_ws_control_frames = false,
+      .supported_subprotocol = nullptr,
+    };
+    esp_err_t err = httpd_register_uri_handler(hd, &ws_uri);
+    if (err == ESP_OK) {
+      ESP_LOGI(TAG, "WebSocket touch endpoint registered at /ws");
+    } else {
+      ESP_LOGW(TAG, "Failed to register WebSocket endpoint: %d", err);
+    }
+  }
+#endif
+
+  ESP_LOGI(TAG, "Screen mirror endpoints active at: %s, /screenshot.jpg, /screenshot.bmp, /tap, /touch, /swipe, /ws",
            this->web_path_.c_str());
 }
+
+#if defined(USE_ESP32) && defined(CONFIG_HTTPD_WS_SUPPORT)
+esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
+  if (req->method == HTTP_GET) {
+    ESP_LOGD(TAG, "WebSocket client handshake established");
+    return ESP_OK;
+  }
+
+  httpd_ws_frame_t ws_pkt;
+  memset(&ws_pkt, 0, sizeof(httpd_ws_frame_t));
+
+  // 1. Query frame length and type
+  esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, 0);
+  if (ret != ESP_OK) {
+    ESP_LOGW(TAG, "httpd_ws_recv_frame failed to get frame length: %d", ret);
+    return ret;
+  }
+
+  if (ws_pkt.len == 0) {
+    return ESP_OK;
+  }
+
+  // 2. Read frame payload into stack buffer (touch packets are tiny strings like "D 100 200")
+  char buf[64];
+  if (ws_pkt.len >= sizeof(buf)) {
+    ESP_LOGW(TAG, "WebSocket payload too large (%zu bytes), ignoring", ws_pkt.len);
+    return ESP_OK;
+  }
+
+  ws_pkt.payload = reinterpret_cast<uint8_t *>(buf);
+  ret = httpd_ws_recv_frame(req, &ws_pkt, sizeof(buf) - 1);
+  if (ret != ESP_OK) {
+    ESP_LOGW(TAG, "httpd_ws_recv_frame failed to receive payload: %d", ret);
+    return ret;
+  }
+  buf[ws_pkt.len] = '\0';
+
+  auto *mirror = static_cast<ScreenMirrorComponent *>(req->user_ctx);
+  if (mirror == nullptr) {
+    return ESP_OK;
+  }
+
+  // Parse packet: "T <x> <y>", "D <x> <y>", "M <x> <y>", "U" (or "U <x> <y>")
+  char action_char = buf[0];
+  int x = 0, y = 0;
+  if (action_char == 'T' || action_char == 't') {
+    if (sscanf(buf + 1, "%d %d", &x, &y) == 2) {
+      mirror->simulate_tap(x, y, 180);
+    }
+  } else if (action_char == 'D' || action_char == 'd') {
+    if (sscanf(buf + 1, "%d %d", &x, &y) == 2) {
+      mirror->simulate_touch(x, y, "down");
+    }
+  } else if (action_char == 'M' || action_char == 'm') {
+    if (sscanf(buf + 1, "%d %d", &x, &y) == 2) {
+      mirror->simulate_touch(x, y, "move");
+    }
+  } else if (action_char == 'U' || action_char == 'u') {
+    if (sscanf(buf + 1, "%d %d", &x, &y) == 2) {
+      mirror->simulate_touch(x, y, "up");
+    } else {
+      mirror->simulate_touch(0, 0, "up");
+    }
+  }
+
+  return ESP_OK;
+}
+#endif
 
 void ScreenMirrorComponent::loop() {
 #ifdef USE_TOUCHSCREEN
@@ -446,17 +554,38 @@ bool ScreenMirrorComponent::build_bmp_header(int width, int height, uint8_t *hea
   return true;
 }
 
+void ScreenMirrorComponent::release_touch_() {
+#ifdef USE_TOUCHSCREEN
+  this->cancel_timeout("min_touch_hold");
+  this->cancel_timeout("release_tap");
+  if (this->touchscreen_ != nullptr && this->is_touch_down_) {
+    for (auto *listener : TouchscreenAccess::get_listeners(this->touchscreen_)) {
+      listener->release();
+    }
+    this->touchscreen_->get_release_trigger()->trigger();
+    this->is_touch_down_ = false;
+    this->mark_dirty();
+  }
+#endif
+}
+
 bool ScreenMirrorComponent::simulate_tap(int x, int y, uint16_t duration_ms) {
+  if (duration_ms == 0) {
+    duration_ms = 180;
+  }
   ESP_LOGD(TAG, "Simulating tap at (%d, %d) for %u ms", x, y, duration_ms);
 
 #ifdef USE_TOUCHSCREEN
   if (this->touchscreen_ != nullptr) {
+    this->cancel_timeout("release_tap");
+    this->cancel_timeout("min_touch_hold");
+
     // 1. Send touch down
     this->simulate_touch(x, y, "down");
 
     // 2. Schedule release after duration_ms
-    this->set_timeout("release_tap", duration_ms, [this, x, y]() {
-      this->simulate_touch(x, y, "up");
+    this->set_timeout("release_tap", duration_ms, [this]() {
+      this->release_touch_();
     });
     return true;
   }
@@ -473,7 +602,13 @@ bool ScreenMirrorComponent::simulate_touch(int x, int y, const std::string &acti
     return false;
   }
 
+  this->cancel_timeout("min_touch_hold");
+
   if (action == "down") {
+    this->last_touch_down_time_ = millis();
+    this->last_touch_x_ = x;
+    this->last_touch_y_ = y;
+
     touchscreen::TouchPoint tp{};
     tp.id = 0;
     tp.state = touchscreen::STATE_PRESSED;
@@ -495,6 +630,9 @@ bool ScreenMirrorComponent::simulate_touch(int x, int y, const std::string &acti
     return true;
 
   } else if (action == "move") {
+    this->last_touch_x_ = x;
+    this->last_touch_y_ = y;
+
     touchscreen::TouchPoint tp{};
     tp.id = 0;
     tp.state = touchscreen::STATE_UPDATED;
@@ -515,13 +653,16 @@ bool ScreenMirrorComponent::simulate_touch(int x, int y, const std::string &acti
     return true;
 
   } else if (action == "up") {
-    // Release touch
-    for (auto *listener : TouchscreenAccess::get_listeners(this->touchscreen_)) {
-      listener->release();
+    uint32_t elapsed = millis() - this->last_touch_down_time_;
+    const uint32_t min_hold_ms = 180;
+    if (this->is_touch_down_ && elapsed < min_hold_ms) {
+      uint32_t delay_ms = min_hold_ms - elapsed;
+      this->set_timeout("min_touch_hold", delay_ms, [this]() {
+        this->release_touch_();
+      });
+      return true;
     }
-    this->touchscreen_->get_release_trigger()->trigger();
-    this->is_touch_down_ = false;
-    this->mark_dirty();
+    this->release_touch_();
     return true;
   }
 
