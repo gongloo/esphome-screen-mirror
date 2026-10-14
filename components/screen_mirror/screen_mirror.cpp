@@ -228,7 +228,11 @@ void ScreenMirrorComponent::setup() {
       char end_boundary[64];
       snprintf(end_boundary, sizeof(end_boundary), "\r\n--%s\r\n", BOUNDARY);
 
-      while (true) {
+      uint32_t stream_start = millis();
+      // Stream for up to 300 seconds (or until client closes / disconnects) to prevent permanent socket starvation
+      static constexpr uint32_t MAX_STREAM_DURATION_MS = 300000;
+
+      while (millis() - stream_start < MAX_STREAM_DURATION_MS) {
         uint32_t now = millis();
 
         // If gated streaming is enabled and frame isn't marked dirty, sleep and yield
