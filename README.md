@@ -32,12 +32,14 @@ web_server:
 
 screen_mirror:
   id: hmi_mirror
-  display: rpi_disp            # Reference to your display
-  touchscreen: my_touchscreen  # Optional: reference to touch controller
+  display: rpi_disp            # Required: reference to display
+  touchscreen: my_touchscreen  # Required for tap simulation (/tap & web mirror clicks)
   fps: 1                       # Max streaming framerate
   jpeg_quality: 75             # JPEG quality (1-100)
   gated_streaming: true        # Skip frames when screen has no changes
 ```
+
+> **Note on Touch Simulation:** The `touchscreen:` reference is required for remote tap simulation (`POST /tap` and interactive clicks in `/remote`). Simulated touches are forwarded directly through ESPHome's `Touchscreen` subsystem, executing any user-defined `on_touch:` automations (such as waking displays from sleep) as well as UI touch listeners (like LVGL).
 
 Once flashed, open your browser:
 * **Interactive Web Mirror:** `http://<your-device-ip>/remote`

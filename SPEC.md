@@ -64,7 +64,8 @@ To ensure compatibility across hardware, `esphome-screen-mirror` implements a un
   - Configurable press duration (default: ~50ms).
 - **REQ-INP-2 (Drag / Swipe):** Expose `POST /swipe` accepting `{ "start_x": int, "start_y": int, "end_x": int, "end_y": int, "duration_ms": int }` for scrolling/gestures.
 - **REQ-INP-3 (Continuous Touch):** Expose `POST /touch` accepting state changes (`down`, `move`, `up`) for live interactive dragging on the web canvas.
-- **REQ-INP-4 (Hardware Touch Non-Interference):** Software-injected touches must cleanly coexist with physical touch controller interrupts (e.g. GT911, XPT2046).
+- **REQ-INP-4 (Touchscreen Subsystem Requirement):** Input simulation relies exclusively on the ESPHome `Touchscreen` subsystem (`touchscreen: <id>`). Simulated touches are dispatched through `touchscreen->get_touch_trigger()` and all registered listeners. This cleanly decouples `screen_mirror` from UI frameworks, triggers custom YAML `on_touch:` automations (such as waking displays from idle/snow states), and routes directly into UI listeners (like LVGL).
+- **REQ-INP-5 (Hardware Touch Non-Interference):** Software-injected touches cleanly coexist with physical touch controller interrupts (e.g. GT911, XPT2046).
 
 #### 4.3 Embedded Web UI (Web Mirror)
 

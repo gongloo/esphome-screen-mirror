@@ -14,11 +14,6 @@
 #include "esphome/components/mipi_rgb/mipi_rgb.h"
 #endif
 
-#if __has_include("lvgl.h")
-#define HAS_LVGL 1
-#include "lvgl.h"
-#endif
-
 #if __has_include("esphome/components/display/display_buffer.h")
 #include "esphome/components/display/display_buffer.h"
 #endif
@@ -28,18 +23,14 @@ namespace screen_mirror {
 
 static const char *const TAG = "screen_mirror";
 
-#if defined(HAS_LVGL)
-// Static state for virtual touch indev driver
-static lv_indev_t *s_virtual_indev = nullptr;
-static int s_tap_x = 0;
-static int s_tap_y = 0;
-static bool s_is_pressed = false;
-
-static void virtual_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
-  data->point.x = s_tap_x;
-  data->point.y = s_tap_y;
-  data->state = s_is_pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
-}
+#ifdef USE_TOUCHSCREEN
+// Accessor to dispatch simulated touch events to protected touch_listeners_
+class TouchscreenAccess : public touchscreen::Touchscreen {
+ public:
+  static const std::vector<touchscreen::TouchListener *> &get_listeners(touchscreen::Touchscreen *ts) {
+    return static_cast<TouchscreenAccess *>(ts)->touch_listeners_;
+  }
+};
 #endif
 
 // HTML5 Interactive Web Mirror
@@ -245,18 +236,6 @@ void ScreenMirrorComponent::setup() {
   } else {
     ESP_LOGI(TAG, "Allocated %u KB JPEG working buffer in PSRAM", (unsigned)(this->jpeg_buffer_size_ / 1024));
   }
-
-#if defined(HAS_LVGL)
-  // Register virtual touch indev in LVGL 9
-  s_virtual_indev = lv_indev_create();
-  if (s_virtual_indev != nullptr) {
-    lv_indev_set_type(s_virtual_indev, LV_INDEV_TYPE_POINTER);
-    lv_indev_set_read_cb(s_virtual_indev, virtual_touch_read_cb);
-    ESP_LOGI(TAG, "LVGL 9 virtual touch input device registered successfully");
-  } else {
-    ESP_LOGW(TAG, "Failed to create LVGL virtual input device");
-  }
-#endif
 
   if (web_server_base::global_web_server_base == nullptr) {
     ESP_LOGW(TAG, "No web_server_base registered; remote endpoints will be unavailable.");
@@ -543,18 +522,38 @@ bool ScreenMirrorComponent::build_bmp_header(int width, int height, uint8_t *hea
 bool ScreenMirrorComponent::simulate_tap(int x, int y, uint16_t duration_ms) {
   ESP_LOGD(TAG, "Simulating tap at (%d, %d) for %u ms", x, y, duration_ms);
 
-#if defined(HAS_LVGL)
-  s_tap_x = x;
-  s_tap_y = y;
-  s_is_pressed = true;
+#ifdef USE_TOUCHSCREEN
+  if (this->touchscreen_ != nullptr) {
+    touchscreen::TouchPoint tp{};
+    tp.id = 0;
+    tp.state = touchscreen::STATE_PRESSED;
+    tp.x = x;
+    tp.y = y;
+    tp.x_raw = x;
+    tp.y_raw = y;
 
-  this->set_timeout("release_tap", duration_ms, []() {
-    s_is_pressed = false;
-  });
-  return true;
-#else
-  return false;
+    // 1. Fire on_touch trigger (wakes display / cancels sleep in YAML)
+    this->touchscreen_->get_touch_trigger()->trigger(tp, {tp});
+
+    // 2. Dispatch touch down to all registered listeners (e.g. LVTouchListener)
+    for (auto *listener : TouchscreenAccess::get_listeners(this->touchscreen_)) {
+      listener->touch(tp);
+      listener->update({tp});
+    }
+
+    // 3. Schedule release after duration_ms
+    this->set_timeout("release_tap", duration_ms, [this]() {
+      for (auto *listener : TouchscreenAccess::get_listeners(this->touchscreen_)) {
+        listener->release();
+      }
+      this->touchscreen_->get_release_trigger()->trigger();
+    });
+    return true;
+  }
 #endif
+
+  ESP_LOGW(TAG, "Cannot simulate tap: no touchscreen component configured under screen_mirror");
+  return false;
 }
 
 }  // namespace screen_mirror
