@@ -21,6 +21,8 @@ class ScreenMirrorComponent : public Component {
 #ifdef USE_TOUCHSCREEN
   void set_touchscreen(touchscreen::Touchscreen *touch) { this->touchscreen_ = touch; }
 #endif
+  void set_rotation(uint16_t rotation) { this->rotation_ = rotation; }
+  uint16_t get_rotation() const { return this->rotation_; }
   void set_fps(float fps) { this->fps_ = fps; }
   void set_jpeg_quality(uint8_t quality) { this->jpeg_quality_ = quality; }
   void set_gated_streaming(bool gated) { this->gated_streaming_ = gated; }
@@ -50,6 +52,7 @@ class ScreenMirrorComponent : public Component {
 #ifdef USE_TOUCHSCREEN
   touchscreen::Touchscreen *touchscreen_{nullptr};
 #endif
+  uint16_t rotation_{0};
   float fps_{1.0f};
   uint8_t jpeg_quality_{75};
   bool gated_streaming_{true};

@@ -68,7 +68,7 @@ static const char REMOTE_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       box-shadow: 0 20px 30px -10px rgba(0,0,0,0.6), 0 10px 15px -5px rgba(0,0,0,0.4);
       border-radius: 12px; overflow: hidden; border: 2px solid #1e293b; background: #000;
     }
-    #screen { display: block; max-width: 90vw; max-height: 80vh; width: auto; height: auto; cursor: crosshair; }
+    #screenCanvas { display: block; max-width: 90vw; max-height: 80vh; width: auto; height: auto; cursor: crosshair; }
     .ripple {
       position: absolute; width: 28px; height: 28px; background: rgba(56, 189, 248, 0.5);
       border: 2px solid #fff; border-radius: 50%; transform: translate(-50%, -50%) scale(0);
@@ -88,11 +88,12 @@ static const char REMOTE_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 <body>
   <div class="header">
     <div class="badge">Device: <span id="res">-</span></div>
+    <div class="badge">Orientation: <span id="rot">0°</span></div>
     <div class="badge">Latency: <span id="lat">-</span> ms</div>
     <div class="badge">Status: <span id="stat" style="color: #10b981">Connected</span></div>
   </div>
   <div class="screen-container" id="container">
-    <img id="screen" src="/screenshot.jpg" alt="Screen Mirror">
+    <canvas id="screenCanvas"></canvas>
   </div>
   <div class="status">Click or tap anywhere on the screen to simulate touch</div>
   <div class="btn-group">
@@ -101,17 +102,32 @@ static const char REMOTE_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
     <button onclick="window.open('/screenshot.bmp', '_blank')">Raw BMP</button>
   </div>
   <script>
-    const screen = document.getElementById('screen');
+    const canvas = document.getElementById('screenCanvas');
+    const ctx = canvas.getContext('2d');
     const container = document.getElementById('container');
     const latSpan = document.getElementById('lat');
     const resSpan = document.getElementById('res');
+    const rotSpan = document.getElementById('rot');
+
     let isRefreshing = false;
+    let rotation = 0;
+    let hwWidth = 800;
+    let hwHeight = 480;
 
     async function updateInfo() {
       try {
         const res = await fetch('/mirror/info');
         const data = await res.json();
-        resSpan.textContent = `${data.width}×${data.height}`;
+        hwWidth = data.width || 800;
+        hwHeight = data.height || 480;
+        rotation = data.rotation || 0;
+        rotSpan.textContent = `${rotation}°`;
+
+        if (rotation === 90 || rotation === 270) {
+          resSpan.textContent = `${hwHeight}×${hwWidth}`;
+        } else {
+          resSpan.textContent = `${hwWidth}×${hwHeight}`;
+        }
       } catch (e) {}
     }
     updateInfo();
@@ -123,21 +139,72 @@ static const char REMOTE_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       const img = new Image();
       img.src = '/screenshot.jpg?t=' + Date.now();
       img.onload = () => {
-        screen.src = img.src;
         latSpan.textContent = Math.round(performance.now() - start);
+        drawRotated(img);
         isRefreshing = false;
       };
       img.onerror = () => { isRefreshing = false; };
     }
 
-    screen.addEventListener('click', async (e) => {
-      const rect = screen.getBoundingClientRect();
-      const nativeW = screen.naturalWidth || 800;
-      const nativeH = screen.naturalHeight || 480;
+    function drawRotated(img) {
+      const w = img.naturalWidth || hwWidth;
+      const h = img.naturalHeight || hwHeight;
+
+      if (rotation === 90 || rotation === 270) {
+        if (canvas.width !== h || canvas.height !== w) {
+          canvas.width = h;
+          canvas.height = w;
+        }
+      } else {
+        if (canvas.width !== w || canvas.height !== h) {
+          canvas.width = w;
+          canvas.height = h;
+        }
+      }
+
+      ctx.save();
+      if (rotation === 90) {
+        ctx.translate(canvas.width, 0);
+        ctx.rotate(90 * Math.PI / 180);
+      } else if (rotation === 180) {
+        ctx.translate(canvas.width, canvas.height);
+        ctx.rotate(180 * Math.PI / 180);
+      } else if (rotation === 270) {
+        ctx.translate(0, canvas.height);
+        ctx.rotate(270 * Math.PI / 180);
+      }
+      ctx.drawImage(img, 0, 0);
+      ctx.restore();
+    }
+
+    canvas.addEventListener('click', async (e) => {
+      const rect = canvas.getBoundingClientRect();
       const clickX = e.clientX - rect.left;
       const clickY = e.clientY - rect.top;
-      const x = Math.round(clickX * (nativeW / rect.width));
-      const y = Math.round(clickY * (nativeH / rect.height));
+
+      // Coordinate in the visible canvas space
+      const dispX = Math.round(clickX * (canvas.width / rect.width));
+      const dispY = Math.round(clickY * (canvas.height / rect.height));
+
+      // Map from rotated canvas coordinates back to raw unrotated hardware framebuffer coordinates
+      let rawX, rawY;
+      if (rotation === 90) {
+        rawX = hwWidth - dispY - 1;
+        rawY = dispX;
+      } else if (rotation === 180) {
+        rawX = hwWidth - dispX - 1;
+        rawY = hwHeight - dispY - 1;
+      } else if (rotation === 270) {
+        rawX = dispY;
+        rawY = hwHeight - dispX - 1;
+      } else {
+        rawX = dispX;
+        rawY = dispY;
+      }
+
+      // Constrain within bounds
+      rawX = Math.max(0, Math.min(hwWidth - 1, Math.round(rawX)));
+      rawY = Math.max(0, Math.min(hwHeight - 1, Math.round(rawY)));
 
       // Visual feedback ripple
       const ripple = document.createElement('div');
@@ -148,13 +215,14 @@ static const char REMOTE_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       setTimeout(() => ripple.remove(), 400);
 
       try {
-        await fetch(`/tap?x=${x}&y=${y}`, { method: 'POST', body: '' });
+        await fetch(`/tap?x=${rawX}&y=${rawY}`, { method: 'POST', body: '' });
         setTimeout(() => refreshScreen(true), 120);
       } catch (err) {
         console.error(err);
       }
     });
 
+    refreshScreen(true);
     setInterval(() => refreshScreen(false), 1000);
   </script>
 </body>
@@ -280,8 +348,8 @@ void ScreenMirrorComponent::setup() {
       int w = (this->parent_->display_ != nullptr) ? this->parent_->display_->get_width() : 0;
       int h = (this->parent_->display_ != nullptr) ? this->parent_->display_->get_height() : 0;
       snprintf(json, sizeof(json),
-               "{\"width\":%d,\"height\":%d,\"fps\":%.1f,\"jpeg_quality\":%d,\"gated\":%s}",
-               w, h, this->parent_->fps_, this->parent_->jpeg_quality_,
+               "{\"width\":%d,\"height\":%d,\"rotation\":%u,\"fps\":%.1f,\"jpeg_quality\":%d,\"gated\":%s}",
+               w, h, this->parent_->rotation_, this->parent_->fps_, this->parent_->jpeg_quality_,
                this->parent_->gated_streaming_ ? "true" : "false");
       AsyncWebServerResponse *response = request->beginResponse(200, "application/json", json);
       response->addHeader("Access-Control-Allow-Origin", "*");
@@ -361,6 +429,7 @@ void ScreenMirrorComponent::loop() {
 
 void ScreenMirrorComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "Screen Mirror:");
+  ESP_LOGCONFIG(TAG, "  Rotation: %u°", this->rotation_);
   ESP_LOGCONFIG(TAG, "  FPS Target: %.1f", this->fps_);
   ESP_LOGCONFIG(TAG, "  JPEG Quality: %u", this->jpeg_quality_);
   ESP_LOGCONFIG(TAG, "  Gated Streaming: %s", YESNO(this->gated_streaming_));
