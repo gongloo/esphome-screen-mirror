@@ -33,192 +33,9 @@ class TouchscreenAccess : public touchscreen::Touchscreen {
 };
 #endif
 
-// HTML5 Interactive Web Mirror
-static const char REMOTE_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ESPHome Screen Mirror</title>
-  <style>
-    * { box-sizing: border-box; }
-    body {
-      margin: 0; background: #070e1b; color: #f1f5f9;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
-      min-height: 100vh; padding: 16px;
-    }
-    .header { margin-bottom: 14px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: center; }
-    .badge {
-      background: #0f1929; border: 1px solid #1e293b; padding: 6px 12px; border-radius: 8px;
-      font-size: 13px; font-weight: 500; color: #94a3b8;
-    }
-    .badge span { color: #38bdf8; font-weight: 600; }
-    .screen-container {
-      position: relative; display: inline-block;
-      box-shadow: 0 20px 30px -10px rgba(0,0,0,0.6), 0 10px 15px -5px rgba(0,0,0,0.4);
-      border-radius: 12px; overflow: hidden; border: 2px solid #1e293b; background: #000;
-    }
-    #screenCanvas { display: block; max-width: 90vw; max-height: 80vh; width: auto; height: auto; cursor: crosshair; }
-    .ripple {
-      position: absolute; width: 28px; height: 28px; background: rgba(56, 189, 248, 0.5);
-      border: 2px solid #fff; border-radius: 50%; transform: translate(-50%, -50%) scale(0);
-      animation: ripple-anim 0.35s ease-out forwards; pointer-events: none;
-    }
-    @keyframes ripple-anim { to { transform: translate(-50%, -50%) scale(2.0); opacity: 0; } }
-    .status { margin-top: 14px; font-size: 13px; color: #64748b; }
-    .btn-group { margin-top: 10px; display: flex; gap: 8px; }
-    button {
-      background: #1e293b; border: 1px solid #334155; color: #cbd5e1;
-      padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer;
-      transition: background 0.15s;
-    }
-    button:hover { background: #334155; color: #fff; }
-  </style>
-</head>
-<body>
-  <div class="header">
-    <div class="badge">Device: <span id="res">-</span></div>
-    <div class="badge">Orientation: <span id="rot">0°</span></div>
-    <div class="badge">Latency: <span id="lat">-</span> ms</div>
-    <div class="badge">Status: <span id="stat" style="color: #10b981">Connected</span></div>
-  </div>
-  <div class="screen-container" id="container">
-    <canvas id="screenCanvas"></canvas>
-  </div>
-  <div class="status">Click or tap anywhere on the screen to simulate touch</div>
-  <div class="btn-group">
-    <button onclick="refreshScreen(true)">Snapshot (Refresh)</button>
-    <button onclick="window.open('/screenshot.jpg', '_blank')">Full JPEG</button>
-    <button onclick="window.open('/screenshot.bmp', '_blank')">Raw BMP</button>
-  </div>
-  <script>
-    const canvas = document.getElementById('screenCanvas');
-    const ctx = canvas.getContext('2d');
-    const container = document.getElementById('container');
-    const latSpan = document.getElementById('lat');
-    const resSpan = document.getElementById('res');
-    const rotSpan = document.getElementById('rot');
-
-    let isRefreshing = false;
-    let rotation = 0;
-    let hwWidth = 800;
-    let hwHeight = 480;
-
-    async function updateInfo() {
-      try {
-        const res = await fetch('/mirror/info');
-        const data = await res.json();
-        hwWidth = data.width || 800;
-        hwHeight = data.height || 480;
-        rotation = data.rotation || 0;
-        rotSpan.textContent = `${rotation}°`;
-
-        if (rotation === 90 || rotation === 270) {
-          resSpan.textContent = `${hwHeight}×${hwWidth}`;
-        } else {
-          resSpan.textContent = `${hwWidth}×${hwHeight}`;
-        }
-      } catch (e) {}
-    }
-    updateInfo();
-
-    async function refreshScreen(manual = false) {
-      if (isRefreshing && !manual) return;
-      isRefreshing = true;
-      const start = performance.now();
-      const img = new Image();
-      img.src = '/screenshot.jpg?t=' + Date.now();
-      img.onload = () => {
-        latSpan.textContent = Math.round(performance.now() - start);
-        drawRotated(img);
-        isRefreshing = false;
-      };
-      img.onerror = () => { isRefreshing = false; };
-    }
-
-    function drawRotated(img) {
-      const w = img.naturalWidth || hwWidth;
-      const h = img.naturalHeight || hwHeight;
-
-      if (rotation === 90 || rotation === 270) {
-        if (canvas.width !== h || canvas.height !== w) {
-          canvas.width = h;
-          canvas.height = w;
-        }
-      } else {
-        if (canvas.width !== w || canvas.height !== h) {
-          canvas.width = w;
-          canvas.height = h;
-        }
-      }
-
-      ctx.save();
-      if (rotation === 90) {
-        // 90 deg CCW (270 deg) brings the buffer upright
-        ctx.translate(0, canvas.height);
-        ctx.rotate(270 * Math.PI / 180);
-      } else if (rotation === 180) {
-        ctx.translate(canvas.width, canvas.height);
-        ctx.rotate(180 * Math.PI / 180);
-      } else if (rotation === 270) {
-        ctx.translate(canvas.width, 0);
-        ctx.rotate(90 * Math.PI / 180);
-      }
-      ctx.drawImage(img, 0, 0);
-      ctx.restore();
-    }
-
-    canvas.addEventListener('click', async (e) => {
-      const rect = canvas.getBoundingClientRect();
-      const clickX = e.clientX - rect.left;
-      const clickY = e.clientY - rect.top;
-
-      // Coordinate in the visible canvas space
-      const dispX = Math.round(clickX * (canvas.width / rect.width));
-      const dispY = Math.round(clickY * (canvas.height / rect.height));
-
-      // Map from rotated canvas coordinates back to raw unrotated hardware framebuffer coordinates
-      let rawX, rawY;
-      if (rotation === 90) {
-        rawX = dispY;
-        rawY = hwHeight - dispX - 1;
-      } else if (rotation === 180) {
-        rawX = hwWidth - dispX - 1;
-        rawY = hwHeight - dispY - 1;
-      } else if (rotation === 270) {
-        rawX = hwWidth - dispY - 1;
-        rawY = dispX;
-      } else {
-        rawX = dispX;
-        rawY = dispY;
-      }
-
-      // Constrain within bounds
-      rawX = Math.max(0, Math.min(hwWidth - 1, Math.round(rawX)));
-      rawY = Math.max(0, Math.min(hwHeight - 1, Math.round(rawY)));
-
-      // Visual feedback ripple
-      const ripple = document.createElement('div');
-      ripple.className = 'ripple';
-      ripple.style.left = clickX + 'px';
-      ripple.style.top = clickY + 'px';
-      container.appendChild(ripple);
-      setTimeout(() => ripple.remove(), 400);
-
-      try {
-        await fetch(`/tap?x=${rawX}&y=${rawY}`, { method: 'POST', body: '' });
-        setTimeout(() => refreshScreen(true), 120);
-      } catch (err) {
-        console.error(err);
-      }
-    });
-
-    refreshScreen(true);
-    setInterval(() => refreshScreen(false), 1000);
-  </script>
-</body>
-</html>)rawliteral";
+#if __has_include("remote_html.h")
+#include "remote_html.h"
+#endif
 
 void ScreenMirrorComponent::setup() {
   ESP_LOGCONFIG(TAG, "Setting up Screen Mirror component...");
@@ -383,9 +200,15 @@ void ScreenMirrorComponent::setup() {
       return request->url_to(url_buf) == this->parent_->web_path_;
     }
     void handleRequest(AsyncWebServerRequest *request) override {
-      AsyncWebServerResponse *response = request->beginResponse(200, "text/html", (const uint8_t *)REMOTE_HTML, sizeof(REMOTE_HTML) - 1);
+#if defined(REMOTE_HTML_GZ) || __has_include("remote_html.h")
+      AsyncWebServerResponse *response = request->beginResponse(
+          200, "text/html", REMOTE_HTML_GZ, REMOTE_HTML_GZ_SIZE);
+      response->addHeader("Content-Encoding", "gzip");
       response->addHeader("Access-Control-Allow-Origin", "*");
       request->send(response);
+#else
+      request->send(404, "text/plain", "Remote UI asset not found");
+#endif
     }
   };
 

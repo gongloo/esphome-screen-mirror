@@ -91,8 +91,33 @@ async def to_code(config):
     cg.add(var.set_core(config[CONF_CORE]))
     cg.add_define("USE_SCREEN_MIRROR")
 
+    # Preprocess remote.html into PROGMEM byte array header (gzipped)
+    import gzip
+    import os
+
+    html_file = os.path.join(os.path.dirname(__file__), "remote.html")
+    with open(html_file, "rb") as f:
+        html_bytes = f.read()
+
+    gzipped = gzip.compress(html_bytes)
+    hex_bytes = ", ".join(f"0x{b:02x}" for b in gzipped)
+
+    header_content = f"""#pragma once
+#include "esphome/core/progmem.h"
+#include <stddef.h>
+
+// Automatically generated from remote.html during compile phase. Do not edit.
+constexpr uint8_t REMOTE_HTML_GZ[] PROGMEM = {{{hex_bytes}}};
+constexpr size_t REMOTE_HTML_GZ_SIZE = {len(gzipped)};
+"""
+    build_src_dir = os.path.join(CORE.build_path, "src")
+    os.makedirs(build_src_dir, exist_ok=True)
+    with open(os.path.join(build_src_dir, "remote_html.h"), "w", encoding="utf-8") as f:
+        f.write(header_content)
+
     if CORE.is_esp32:
         from esphome.components.esp32 import add_idf_component
         add_idf_component(name="espressif/esp_new_jpeg", ref="^1.0.2")
+
 
 
