@@ -72,30 +72,88 @@ def _final_validate(config):
                 detected_rot = disp.get("rotation", 0)
         config[CONF_ROTATION] = display.validate_rotation(detected_rot)
 
-    # Auto-detect byte_order if not explicitly specified
-    if CONF_BYTE_ORDER not in config:
-        big_endian = False
+def _detect_byte_order(config):
+    # If explicitly configured in screen_mirror schema, honor it
+    if CONF_BYTE_ORDER in config:
+        return config[CONF_BYTE_ORDER]
+
+    # Search caller frames for the validated Config object
+    import inspect
+    for frame in inspect.stack():
+        for val in frame.frame.f_locals.values():
+            if type(val).__name__ == "Config":
+                if "lvgl" in val:
+                    lv = val["lvgl"]
+                    if isinstance(lv, list) and len(lv) > 0:
+                        bo = lv[0].get("byte_order")
+                        if bo is not None:
+                            return bo == "big_endian"
+                    elif isinstance(lv, dict):
+                        bo = lv.get("byte_order")
+                        if bo is not None:
+                            return bo == "big_endian"
+                if "display" in val:
+                    disp = val["display"]
+                    if isinstance(disp, list) and len(disp) > 0:
+                        bo = disp[0].get("byte_order")
+                        if bo is not None:
+                            return bo == "big_endian"
+                    elif isinstance(disp, dict):
+                        bo = disp.get("byte_order")
+                        if bo is not None:
+                            return bo == "big_endian"
+
+    # Fallback to checking final_validate context
+    import esphome.final_validate as fv
+    try:
+        full = fv.full_config.get()
         if "lvgl" in full:
             lv = full["lvgl"]
             if isinstance(lv, list) and len(lv) > 0:
                 bo = lv[0].get("byte_order")
                 if bo is not None:
-                    big_endian = (bo == "big_endian")
+                    return bo == "big_endian"
             elif isinstance(lv, dict):
                 bo = lv.get("byte_order")
                 if bo is not None:
-                    big_endian = (bo == "big_endian")
-        elif "display" in full:
+                    return bo == "big_endian"
+        if "display" in full:
             disp = full["display"]
             if isinstance(disp, list) and len(disp) > 0:
                 bo = disp[0].get("byte_order")
                 if bo is not None:
-                    big_endian = (bo == "big_endian")
+                    return bo == "big_endian"
             elif isinstance(disp, dict):
                 bo = disp.get("byte_order")
                 if bo is not None:
-                    big_endian = (bo == "big_endian")
-        config[CONF_BYTE_ORDER] = big_endian
+                    return bo == "big_endian"
+    except Exception:
+        pass
+
+    return False
+
+
+def _final_validate(config):
+    import esphome.final_validate as fv
+
+    full = fv.full_config.get()
+
+    # Auto-detect rotation if not explicitly specified
+    if CONF_ROTATION not in config:
+        detected_rot = 0
+        if "lvgl" in full:
+            lv = full["lvgl"]
+            if isinstance(lv, list) and len(lv) > 0:
+                detected_rot = lv[0].get("rotation", 0)
+            elif isinstance(lv, dict):
+                detected_rot = lv.get("rotation", 0)
+        elif "display" in full:
+            disp = full["display"]
+            if isinstance(disp, list) and len(disp) > 0:
+                detected_rot = disp[0].get("rotation", 0)
+            elif isinstance(disp, dict):
+                detected_rot = disp.get("rotation", 0)
+        config[CONF_ROTATION] = display.validate_rotation(detected_rot)
 
     return config
 
@@ -115,7 +173,10 @@ async def to_code(config):
         cg.add(var.set_touchscreen(touch))
 
     cg.add(var.set_rotation(config[CONF_ROTATION]))
-    cg.add(var.set_big_endian(config[CONF_BYTE_ORDER]))
+
+    # Resolve byte order during to_code if not explicitly set in YAML
+    is_big_endian = _detect_byte_order(config)
+    cg.add(var.set_big_endian(is_big_endian))
     cg.add(var.set_fps(config[CONF_FPS]))
     cg.add(var.set_jpeg_quality(config[CONF_JPEG_QUALITY]))
     cg.add(var.set_gated_streaming(config[CONF_GATED_STREAMING]))
