@@ -133,32 +133,38 @@ def _detect_byte_order(config):
     return False
 
 
-def _final_validate(config):
-    import esphome.final_validate as fv
+def _detect_rotation(config):
+    # If explicitly configured in screen_mirror schema, honor it
+    if CONF_ROTATION in config:
+        return config[CONF_ROTATION]
 
-    full = fv.full_config.get()
+    # Search caller frames for the validated Config object
+    import inspect
+    for frame in inspect.stack():
+        for val in frame.frame.f_locals.values():
+            if type(val).__name__ == "Config":
+                if "lvgl" in val:
+                    lv = val["lvgl"]
+                    if isinstance(lv, list) and len(lv) > 0:
+                        rot = lv[0].get("rotation")
+                        if rot is not None:
+                            return display.validate_rotation(rot)
+                    elif isinstance(lv, dict):
+                        rot = lv.get("rotation")
+                        if rot is not None:
+                            return display.validate_rotation(rot)
+                if "display" in val:
+                    disp = val["display"]
+                    if isinstance(disp, list) and len(disp) > 0:
+                        rot = disp[0].get("rotation")
+                        if rot is not None:
+                            return display.validate_rotation(rot)
+                    elif isinstance(disp, dict):
+                        rot = disp.get("rotation")
+                        if rot is not None:
+                            return display.validate_rotation(rot)
 
-    # Auto-detect rotation if not explicitly specified
-    if CONF_ROTATION not in config:
-        detected_rot = 0
-        if "lvgl" in full:
-            lv = full["lvgl"]
-            if isinstance(lv, list) and len(lv) > 0:
-                detected_rot = lv[0].get("rotation", 0)
-            elif isinstance(lv, dict):
-                detected_rot = lv.get("rotation", 0)
-        elif "display" in full:
-            disp = full["display"]
-            if isinstance(disp, list) and len(disp) > 0:
-                detected_rot = disp[0].get("rotation", 0)
-            elif isinstance(disp, dict):
-                detected_rot = disp.get("rotation", 0)
-        config[CONF_ROTATION] = display.validate_rotation(detected_rot)
-
-    return config
-
-
-FINAL_VALIDATE_SCHEMA = _final_validate
+    return 0
 
 
 async def to_code(config):
@@ -172,9 +178,10 @@ async def to_code(config):
         touch = await cg.get_variable(config[CONF_TOUCHSCREEN])
         cg.add(var.set_touchscreen(touch))
 
-    cg.add(var.set_rotation(config[CONF_ROTATION]))
+    # Resolve rotation and byte order during to_code if not explicitly set in YAML
+    rotation = _detect_rotation(config)
+    cg.add(var.set_rotation(rotation))
 
-    # Resolve byte order during to_code if not explicitly set in YAML
     is_big_endian = _detect_byte_order(config)
     cg.add(var.set_big_endian(is_big_endian))
     cg.add(var.set_fps(config[CONF_FPS]))
