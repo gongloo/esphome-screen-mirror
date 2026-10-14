@@ -44,6 +44,7 @@ class ScreenMirrorComponent : public Component {
 
   // Input simulation APIs
   bool simulate_tap(int x, int y, uint16_t duration_ms = 50);
+  void mark_dirty() { this->dirty_ = true; }
 
   // Buffer accessors
   uint8_t *get_jpeg_buffer() { return this->jpeg_buffer_; }
@@ -68,7 +69,8 @@ class ScreenMirrorComponent : public Component {
   size_t jpeg_buffer_size_{0};
 
   // State tracking
-  bool dirty_{true};
+  std::atomic<bool> dirty_{true};
+  std::atomic<uint32_t> active_streams_{0};
   uint32_t last_frame_time_{0};
   uint32_t frame_count_{0};
 };
