@@ -35,17 +35,17 @@ web_server:
   port: 80
 
 screen_mirror:
-  id: hmi_mirror
+  id: hmi_mirror               # Optional: component ID
   display: rpi_disp            # Required: reference to display component
-  touchscreen: my_touchscreen  # Required for tap simulation (/tap & web mirror clicks)
-  fps: 1.0                     # Max framerate (default: 1.0, range: 0.1 - 10.0)
-  jpeg_quality: 75             # JPEG quality (default: 75, range: 10 - 100)
-  gated_streaming: true        # Skip frames when screen has no changes
-  web_path: "/remote"          # Web viewer URL path (default: /remote)
-  show_telemetry: true         # Show latency/device info badge in web viewer
+  touchscreen: my_touchscreen  # Optional: reference to touchscreen (required for tap simulation & web mirror clicks)
+  fps: 1.0                     # Optional: max framerate (default: 1.0, range: 0.1 - 10.0)
+  jpeg_quality: 75             # Optional: JPEG quality (default: 75, range: 10 - 100)
+  gated_streaming: true        # Optional: skip frames when screen has no changes (default: true)
+  web_path: "/remote"          # Optional: web viewer URL path (default: /remote)
+  show_telemetry: true         # Optional: show latency/device info badge in web viewer (default: true)
   rotation: 90                 # Optional: 0, 90, 180, 270 (auto-detected from lvgl/display if omitted)
-  byte_order: big_endian       # Optional: big_endian, little_endian (auto-detected if omitted)
-  core: 0                      # ESP32 CPU core (default: 0)
+  byte_order: big_endian       # Optional: big_endian, little_endian (auto-detected from lvgl/display if omitted)
+  core: 0                      # Optional: ESP32 CPU core (default: 0)
 ```
 
 > **Note on Touch Simulation:** The `touchscreen:` reference is required for remote tap simulation (`POST /tap` and interactive clicks in `/remote`). Simulated touches are dispatched directly through ESPHome's `Touchscreen` subsystem, guaranteeing that display wake-on-touch routines and LVGL event listeners trigger identically to physical screen touches.
