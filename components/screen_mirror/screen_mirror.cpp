@@ -233,6 +233,7 @@ void ScreenMirrorComponent::loop() {
 void ScreenMirrorComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "Screen Mirror:");
   ESP_LOGCONFIG(TAG, "  Rotation: %u°", this->rotation_);
+  ESP_LOGCONFIG(TAG, "  Byte Order: %s", this->big_endian_ ? "Big-Endian" : "Little-Endian");
   ESP_LOGCONFIG(TAG, "  FPS Target: %.1f", this->fps_);
   ESP_LOGCONFIG(TAG, "  JPEG Quality: %u", this->jpeg_quality_);
   ESP_LOGCONFIG(TAG, "  Gated Streaming: %s", YESNO(this->gated_streaming_));
@@ -279,7 +280,7 @@ bool ScreenMirrorComponent::encode_jpeg(const uint8_t *rgb565_buffer, int width,
   jpeg_enc_config_t cfg = DEFAULT_JPEG_ENC_CONFIG();
   cfg.width = width;
   cfg.height = height;
-  cfg.src_type = JPEG_PIXEL_FORMAT_RGB565_LE;
+  cfg.src_type = this->big_endian_ ? JPEG_PIXEL_FORMAT_RGB565_BE : JPEG_PIXEL_FORMAT_RGB565_LE;
   cfg.subsampling = JPEG_SUBSAMPLE_420;
   cfg.quality = this->jpeg_quality_;
   cfg.task_enable = false; // Mono-task mode: runs synchronously on current thread, ~10KB DRAM
