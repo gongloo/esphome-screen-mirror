@@ -56,11 +56,13 @@ screen_mirror:
 
 | Endpoint | Method | Description |
 | :--- | :--- | :--- |
-| `/remote` | `GET` | Interactive web mirror with live preview and touch simulation. |
+| `/remote` | `GET` | Interactive web mirror with live preview, pointer dragging, and touch simulation. |
 | `/screenshot.jpg` | `GET` | Hardware-accelerated JPEG snapshot of current screen. |
 | `/screenshot.bmp` | `GET` | Uncompressed 16-bit RGB565 BMP snapshot. |
 | `/mirror/info` | `GET` | JSON metadata (resolution, rotation, byte order, memory). |
-| `/tap?x=..&y=..` | `POST` | Simulate touch event at raw hardware coordinates `(x, y)` (`duration_ms` optional). |
+| `/tap?x=..&y=..` | `POST` | Simulate a touch tap at raw hardware coordinates `(x, y)` (`duration_ms` optional). |
+| `/touch?x=..&y=..&action=..` | `POST` | Continuous touch state injection (`action=down`, `move`, `up`) for live dragging & holds. |
+| `/swipe?start_x=..&start_y=..&end_x=..&end_y=..` | `POST` | Discrete swipe/drag gesture interpolation (`duration` ms optional, default 300ms). |
 
 ---
 
@@ -69,7 +71,7 @@ screen_mirror:
 - [x] Phase 1: Hardware-accelerated JPEG (`/screenshot.jpg`) and BMP (`/screenshot.bmp`) capture.
 - [x] Phase 2: Touch input simulation (`POST /tap`) via ESPHome `Touchscreen` subsystem.
 - [x] Phase 2.5: Interactive web UI (`/remote`) with auto-rotation, coordinate transformation, and build-time gzip asset embedding.
-- [ ] Phase 3: Swipe & drag gestures (`POST /swipe`, continuous touch dragging).
+- [x] Phase 3: Full gesture suite: discrete swipe gestures (`POST /swipe`), continuous touch tracking (`POST /touch` with down/move/up), tap-and-hold release, and web mirror pointer dragging.
 - [ ] Phase 4: Tile-based delta blitting via WebSockets for ultra-low bandwidth streaming.
 
 For the comprehensive architectural specification, see [SPEC.md](SPEC.md).

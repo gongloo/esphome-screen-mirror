@@ -147,10 +147,10 @@
       ctx.restore();
     }
 
-    canvas.addEventListener('click', async (e) => {
+    function clientToRaw(clientX, clientY) {
       const rect = canvas.getBoundingClientRect();
-      const clickX = e.clientX - rect.left;
-      const clickY = e.clientY - rect.top;
+      const clickX = clientX - rect.left;
+      const clickY = clientY - rect.top;
 
       // Coordinate in the visible canvas space
       const dispX = Math.round(clickX * (canvas.width / rect.width));
@@ -159,14 +159,12 @@
       // Map from rotated canvas coordinates back to raw unrotated hardware framebuffer coordinates
       let rawX, rawY;
       if (rotation === 90) {
-        // Matches ctx.translate(0, canvas.height); ctx.rotate(270deg);
         rawX = hwWidth - dispY - 1;
         rawY = dispX;
       } else if (rotation === 180) {
         rawX = hwWidth - dispX - 1;
         rawY = hwHeight - dispY - 1;
       } else if (rotation === 270) {
-        // Matches ctx.translate(canvas.width, 0); ctx.rotate(90deg);
         rawX = dispY;
         rawY = hwHeight - dispX - 1;
       } else {
@@ -174,25 +172,72 @@
         rawY = dispY;
       }
 
-      // Constrain within bounds
       rawX = Math.max(0, Math.min(hwWidth - 1, Math.round(rawX)));
       rawY = Math.max(0, Math.min(hwHeight - 1, Math.round(rawY)));
+      return { clickX, clickY, rawX, rawY };
+    }
 
-      // Visual feedback ripple
+    function showRipple(clickX, clickY) {
       const ripple = document.createElement('div');
       ripple.className = 'ripple';
       ripple.style.left = clickX + 'px';
       ripple.style.top = clickY + 'px';
       container.appendChild(ripple);
       setTimeout(() => ripple.remove(), 400);
+    }
 
+    let isPointerDown = false;
+    let pointerMoved = false;
+    let pointerStartTime = 0;
+    let lastMoveSent = 0;
+
+    async function sendTouch(rawX, rawY, action) {
       try {
-        await fetch(`/tap?x=${rawX}&y=${rawY}`, { method: 'POST', body: '' });
-        setTimeout(() => refreshScreen(true), 120);
+        await fetch(`/touch?x=${rawX}&y=${rawY}&action=${action}`, { method: 'POST', body: '' });
       } catch (err) {
-        console.error(err);
+        console.error('Touch error:', err);
+      }
+    }
+
+    canvas.addEventListener('pointerdown', async (e) => {
+      e.preventDefault();
+      canvas.setPointerCapture(e.pointerId);
+      isPointerDown = true;
+      pointerMoved = false;
+      pointerStartTime = performance.now();
+      lastMoveSent = performance.now();
+
+      const { clickX, clickY, rawX, rawY } = clientToRaw(e.clientX, e.clientY);
+      showRipple(clickX, clickY);
+      await sendTouch(rawX, rawY, 'down');
+    });
+
+    canvas.addEventListener('pointermove', async (e) => {
+      if (!isPointerDown) return;
+      e.preventDefault();
+      pointerMoved = true;
+      const now = performance.now();
+      // Throttle movement events to ~30ms to prevent network congestion
+      if (now - lastMoveSent >= 30) {
+        lastMoveSent = now;
+        const { rawX, rawY } = clientToRaw(e.clientX, e.clientY);
+        await sendTouch(rawX, rawY, 'move');
       }
     });
+
+    const handlePointerUp = async (e) => {
+      if (!isPointerDown) return;
+      e.preventDefault();
+      isPointerDown = false;
+      try { canvas.releasePointerCapture(e.pointerId); } catch (err) {}
+
+      const { rawX, rawY } = clientToRaw(e.clientX, e.clientY);
+      await sendTouch(rawX, rawY, 'up');
+      setTimeout(() => refreshScreen(true), 120);
+    };
+
+    canvas.addEventListener('pointerup', handlePointerUp);
+    canvas.addEventListener('pointercancel', handlePointerUp);
 
     initStream();
   </script>

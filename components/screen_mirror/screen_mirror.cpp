@@ -187,7 +187,84 @@ void ScreenMirrorComponent::setup() {
     }
   };
 
-  // 5. Embedded Web Mirror UI (/remote)
+  // 5. Continuous Touch Handler (/touch?x=...&y=...&action=down|move|up)
+  class TouchHandler : public AsyncWebHandler {
+   protected:
+    ScreenMirrorComponent *parent_;
+   public:
+    TouchHandler(ScreenMirrorComponent *parent) : parent_(parent) {}
+    bool canHandle(AsyncWebServerRequest *request) const override {
+      if (request->method() != HTTP_POST && request->method() != HTTP_GET)
+        return false;
+      char url_buf[AsyncWebServerRequest::URL_BUF_SIZE];
+      return request->url_to(url_buf) == "/touch";
+    }
+    void handleRequest(AsyncWebServerRequest *request) override {
+      if (!request->hasParam("action")) {
+        request->send(400, "application/json", "{\"error\":\"Missing action parameter (down, move, up)\"}");
+        return;
+      }
+      std::string action = request->getParam("action")->value();
+      int x = 0, y = 0;
+      if (action != "up") {
+        if (!request->hasParam("x") || !request->hasParam("y")) {
+          request->send(400, "application/json", "{\"error\":\"Missing x or y parameters\"}");
+          return;
+        }
+        x = std::atoi(request->getParam("x")->value().c_str());
+        y = std::atoi(request->getParam("y")->value().c_str());
+      }
+
+      bool success = this->parent_->simulate_touch(x, y, action);
+      char resp[96];
+      snprintf(resp, sizeof(resp), "{\"status\":\"%s\",\"action\":\"%s\",\"x\":%d,\"y\":%d}",
+               success ? "ok" : "failed", action.c_str(), x, y);
+      AsyncWebServerResponse *response = request->beginResponse(success ? 200 : 500, "application/json", resp);
+      response->addHeader("Access-Control-Allow-Origin", "*");
+      request->send(response);
+    }
+  };
+
+  // 6. Swipe Gesture Handler (/swipe?start_x=...&start_y=...&end_x=...&end_y=...&duration=...)
+  class SwipeHandler : public AsyncWebHandler {
+   protected:
+    ScreenMirrorComponent *parent_;
+   public:
+    SwipeHandler(ScreenMirrorComponent *parent) : parent_(parent) {}
+    bool canHandle(AsyncWebServerRequest *request) const override {
+      if (request->method() != HTTP_POST && request->method() != HTTP_GET)
+        return false;
+      char url_buf[AsyncWebServerRequest::URL_BUF_SIZE];
+      return request->url_to(url_buf) == "/swipe";
+    }
+    void handleRequest(AsyncWebServerRequest *request) override {
+      if (!request->hasParam("start_x") || !request->hasParam("start_y") ||
+          !request->hasParam("end_x") || !request->hasParam("end_y")) {
+        request->send(400, "application/json",
+                      "{\"error\":\"Missing start_x, start_y, end_x, or end_y parameters\"}");
+        return;
+      }
+      int start_x = std::atoi(request->getParam("start_x")->value().c_str());
+      int start_y = std::atoi(request->getParam("start_y")->value().c_str());
+      int end_x = std::atoi(request->getParam("end_x")->value().c_str());
+      int end_y = std::atoi(request->getParam("end_y")->value().c_str());
+      uint16_t duration_ms = 300;
+      if (request->hasParam("duration")) {
+        duration_ms = static_cast<uint16_t>(std::atoi(request->getParam("duration")->value().c_str()));
+      }
+
+      bool success = this->parent_->simulate_swipe(start_x, start_y, end_x, end_y, duration_ms);
+      char resp[128];
+      snprintf(resp, sizeof(resp),
+               "{\"status\":\"%s\",\"start_x\":%d,\"start_y\":%d,\"end_x\":%d,\"end_y\":%d,\"duration\":%u}",
+               success ? "ok" : "failed", start_x, start_y, end_x, end_y, duration_ms);
+      AsyncWebServerResponse *response = request->beginResponse(success ? 200 : 500, "application/json", resp);
+      response->addHeader("Access-Control-Allow-Origin", "*");
+      request->send(response);
+    }
+  };
+
+  // 7. Embedded Web Mirror UI (/remote)
   class RemoteUiHandler : public AsyncWebHandler {
    protected:
     ScreenMirrorComponent *parent_;
@@ -217,17 +294,42 @@ void ScreenMirrorComponent::setup() {
   web_server_base::global_web_server_base->add_handler(new BmpSnapshotHandler(this));
   web_server_base::global_web_server_base->add_handler(new MirrorInfoHandler(this));
   web_server_base::global_web_server_base->add_handler(new TapHandler(this));
+  web_server_base::global_web_server_base->add_handler(new TouchHandler(this));
+  web_server_base::global_web_server_base->add_handler(new SwipeHandler(this));
   web_server_base::global_web_server_base->add_handler(new RemoteUiHandler(this));
 
   // Initialize web_server_base to ensure the HTTP server is listening on port 80
   web_server_base::global_web_server_base->init();
 
-  ESP_LOGI(TAG, "Screen mirror endpoints active at: %s, /screenshot.jpg, /screenshot.bmp, /tap",
+  ESP_LOGI(TAG, "Screen mirror endpoints active at: %s, /screenshot.jpg, /screenshot.bmp, /tap, /touch, /swipe",
            this->web_path_.c_str());
 }
 
 void ScreenMirrorComponent::loop() {
-  // Reserved for Phase 3 streaming event loop
+#ifdef USE_TOUCHSCREEN
+  if (this->active_swipe_.active && this->touchscreen_ != nullptr) {
+    uint32_t now = millis();
+    // Step swipe interpolation every 15-20 ms
+    if (now - this->active_swipe_.last_step_time >= 16) {
+      this->active_swipe_.last_step_time = now;
+      uint32_t elapsed = now - this->active_swipe_.start_time;
+
+      if (elapsed >= this->active_swipe_.duration_ms) {
+        // Final coordinate
+        this->simulate_touch(this->active_swipe_.end_x, this->active_swipe_.end_y, "move");
+        // Release touch
+        this->simulate_touch(this->active_swipe_.end_x, this->active_swipe_.end_y, "up");
+        this->active_swipe_.active = false;
+        ESP_LOGD(TAG, "Swipe completed at (%d, %d)", this->active_swipe_.end_x, this->active_swipe_.end_y);
+      } else {
+        float progress = (float) elapsed / (float) this->active_swipe_.duration_ms;
+        int current_x = this->active_swipe_.start_x + (int) ((this->active_swipe_.end_x - this->active_swipe_.start_x) * progress);
+        int current_y = this->active_swipe_.start_y + (int) ((this->active_swipe_.end_y - this->active_swipe_.start_y) * progress);
+        this->simulate_touch(current_x, current_y, "move");
+      }
+    }
+  }
+#endif
 }
 
 void ScreenMirrorComponent::dump_config() {
@@ -349,6 +451,29 @@ bool ScreenMirrorComponent::simulate_tap(int x, int y, uint16_t duration_ms) {
 
 #ifdef USE_TOUCHSCREEN
   if (this->touchscreen_ != nullptr) {
+    // 1. Send touch down
+    this->simulate_touch(x, y, "down");
+
+    // 2. Schedule release after duration_ms
+    this->set_timeout("release_tap", duration_ms, [this, x, y]() {
+      this->simulate_touch(x, y, "up");
+    });
+    return true;
+  }
+#endif
+
+  ESP_LOGW(TAG, "Cannot simulate tap: no touchscreen component configured under screen_mirror");
+  return false;
+}
+
+bool ScreenMirrorComponent::simulate_touch(int x, int y, const std::string &action) {
+#ifdef USE_TOUCHSCREEN
+  if (this->touchscreen_ == nullptr) {
+    ESP_LOGW(TAG, "Cannot simulate touch: no touchscreen configured");
+    return false;
+  }
+
+  if (action == "down") {
     touchscreen::TouchPoint tp{};
     tp.id = 0;
     tp.state = touchscreen::STATE_PRESSED;
@@ -357,29 +482,83 @@ bool ScreenMirrorComponent::simulate_tap(int x, int y, uint16_t duration_ms) {
     tp.x_raw = x;
     tp.y_raw = y;
 
-    // 1. Fire on_touch trigger (wakes display / cancels sleep in YAML)
+    // Fire on_touch trigger (e.g. wakes screen from sleep)
     this->touchscreen_->get_touch_trigger()->trigger(tp, {tp});
 
-    // 2. Dispatch touch down to all registered listeners (e.g. LVTouchListener)
+    // Notify all registered listeners (LVGL)
     for (auto *listener : TouchscreenAccess::get_listeners(this->touchscreen_)) {
       listener->touch(tp);
       listener->update({tp});
     }
+    this->is_touch_down_ = true;
+    this->mark_dirty();
+    return true;
 
-    // 3. Schedule release after duration_ms
-    this->set_timeout("release_tap", duration_ms, [this]() {
-      for (auto *listener : TouchscreenAccess::get_listeners(this->touchscreen_)) {
-        listener->release();
-      }
-      this->touchscreen_->get_release_trigger()->trigger();
-    });
+  } else if (action == "move") {
+    touchscreen::TouchPoint tp{};
+    tp.id = 0;
+    tp.state = touchscreen::STATE_UPDATED;
+    tp.x = x;
+    tp.y = y;
+    tp.x_raw = x;
+    tp.y_raw = y;
+
+    // Fire update trigger
+    this->touchscreen_->get_update_trigger()->trigger({tp});
+
+    // Notify listeners of coordinate movement
+    for (auto *listener : TouchscreenAccess::get_listeners(this->touchscreen_)) {
+      listener->update({tp});
+    }
+    this->is_touch_down_ = true;
+    this->mark_dirty();
+    return true;
+
+  } else if (action == "up") {
+    // Release touch
+    for (auto *listener : TouchscreenAccess::get_listeners(this->touchscreen_)) {
+      listener->release();
+    }
+    this->touchscreen_->get_release_trigger()->trigger();
+    this->is_touch_down_ = false;
     this->mark_dirty();
     return true;
   }
-#endif
 
-  ESP_LOGW(TAG, "Cannot simulate tap: no touchscreen component configured under screen_mirror");
+  ESP_LOGW(TAG, "Invalid touch action: %s (expected 'down', 'move', or 'up')", action.c_str());
   return false;
+#else
+  return false;
+#endif
+}
+
+bool ScreenMirrorComponent::simulate_swipe(int start_x, int start_y, int end_x, int end_y, uint16_t duration_ms) {
+#ifdef USE_TOUCHSCREEN
+  if (this->touchscreen_ == nullptr) {
+    ESP_LOGW(TAG, "Cannot simulate swipe: no touchscreen configured");
+    return false;
+  }
+
+  ESP_LOGD(TAG, "Starting swipe from (%d, %d) to (%d, %d) over %u ms",
+           start_x, start_y, end_x, end_y, duration_ms);
+
+  // 1. Initial touch down at start coordinates
+  this->simulate_touch(start_x, start_y, "down");
+
+  // 2. Initialize active swipe state for loop() interpolation
+  this->active_swipe_.active = true;
+  this->active_swipe_.start_x = start_x;
+  this->active_swipe_.start_y = start_y;
+  this->active_swipe_.end_x = end_x;
+  this->active_swipe_.end_y = end_y;
+  this->active_swipe_.start_time = millis();
+  this->active_swipe_.duration_ms = duration_ms;
+  this->active_swipe_.last_step_time = millis();
+
+  return true;
+#else
+  return false;
+#endif
 }
 
 }  // namespace screen_mirror

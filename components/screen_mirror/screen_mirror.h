@@ -44,6 +44,8 @@ class ScreenMirrorComponent : public Component {
 
   // Input simulation APIs
   bool simulate_tap(int x, int y, uint16_t duration_ms = 50);
+  bool simulate_touch(int x, int y, const std::string &action); // "down", "move", "up"
+  bool simulate_swipe(int start_x, int start_y, int end_x, int end_y, uint16_t duration_ms = 300);
   void mark_dirty() { this->dirty_ = true; }
 
   // Buffer accessors
@@ -68,8 +70,21 @@ class ScreenMirrorComponent : public Component {
   uint8_t *jpeg_buffer_{nullptr};
   size_t jpeg_buffer_size_{0};
 
+  // Swipe gesture state
+  struct ActiveSwipe {
+    bool active{false};
+    int start_x{0};
+    int start_y{0};
+    int end_x{0};
+    int end_y{0};
+    uint32_t start_time{0};
+    uint32_t duration_ms{0};
+    uint32_t last_step_time{0};
+  } active_swipe_;
+
   // State tracking
   std::atomic<bool> dirty_{true};
+  bool is_touch_down_{false};
   uint32_t last_frame_time_{0};
   uint32_t frame_count_{0};
 };
