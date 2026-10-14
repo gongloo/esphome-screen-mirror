@@ -155,14 +155,15 @@ static const char REMOTE_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 
       ctx.save();
       if (rotation === 90) {
-        ctx.translate(canvas.width, 0);
-        ctx.rotate(90 * Math.PI / 180);
+        // 90 deg CCW (270 deg) brings the buffer upright
+        ctx.translate(0, canvas.height);
+        ctx.rotate(270 * Math.PI / 180);
       } else if (rotation === 180) {
         ctx.translate(canvas.width, canvas.height);
         ctx.rotate(180 * Math.PI / 180);
       } else if (rotation === 270) {
-        ctx.translate(0, canvas.height);
-        ctx.rotate(270 * Math.PI / 180);
+        ctx.translate(canvas.width, 0);
+        ctx.rotate(90 * Math.PI / 180);
       }
       ctx.drawImage(img, 0, 0);
       ctx.restore();
@@ -180,14 +181,14 @@ static const char REMOTE_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       // Map from rotated canvas coordinates back to raw unrotated hardware framebuffer coordinates
       let rawX, rawY;
       if (rotation === 90) {
-        rawX = hwWidth - dispY - 1;
-        rawY = dispX;
+        rawX = dispY;
+        rawY = hwHeight - dispX - 1;
       } else if (rotation === 180) {
         rawX = hwWidth - dispX - 1;
         rawY = hwHeight - dispY - 1;
       } else if (rotation === 270) {
-        rawX = dispY;
-        rawY = hwHeight - dispX - 1;
+        rawX = hwWidth - dispY - 1;
+        rawY = dispX;
       } else {
         rawX = dispX;
         rawY = dispY;
