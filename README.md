@@ -9,18 +9,22 @@ Think of it as **VNC / `scrcpy` built directly into your ESP32**, accessible fro
 
 ---
 
-## Features
+## Current Features
 
-- 📸 **Fast JPEG & BMP Snapshots:** Grab the current screen via `GET /screenshot.jpg` or `GET /screenshot.bmp` in milliseconds.
-- ⚡ **Gated MJPEG Streaming:** Live video stream (`GET /stream.mjpeg`) that automatically drops to 0 FPS / 0 KB/s when the screen is idle, saving CPU cycles and Wi-Fi airtime.
-- 👆 **Remote Touch Simulation:** Send taps via `POST /tap?x=...&y=...` to automate UI navigation or click directly inside the web mirror.
-- 🌐 **Interactive Web Mirror:** Embedded, zero-dependency HTML5 viewer served directly from the device (`GET /remote`).
-- 🤖 **Automation Ready:** Designed for CI/CD test runners, Python test suites, and AI coding agents to visually verify and navigate UI layouts without physical hardware access.
-- 🧩 **Display Abstraction:** Supports both ESP32-S3 RGB panels (`mipi_rgb` + LVGL) and standard SPI displays (`DisplayBuffer` such as ST7789, ILI9341).
+- 📸 **Hardware-Accelerated JPEG Snapshots:** High-speed JPEG capture via `GET /screenshot.jpg` powered by ESP-IDF SIMD/hardware acceleration (`esp_new_jpeg`), requiring ~0 ms extra conversion overhead.
+- 🖼️ **Raw BMP Snapshots:** Pixel-perfect uncompressed frame capture via `GET /screenshot.bmp` for exact color & alignment debugging.
+- 👆 **Direct ESPHome Touch Simulation:** Send taps via `POST /tap?x=...&y=...` with automatic screen-wake support. Taps are routed directly through ESPHome's `Touchscreen` subsystem, executing both user-defined YAML `on_touch:` automations (e.g. waking sleeping displays) and UI listeners (such as LVGL).
+- 🌐 **Interactive Web Mirror (`/remote`):** Embedded, standalone HTML5 viewer preprocessed with gzip and served directly from PROGMEM:
+  - Automatic canvas rotation & coordinate transformation for 0°, 90°, 180°, and 270° orientations.
+  - Interactive click/tap-to-touch with visual ripple feedback.
+  - Live latency telemetry and direct full-screen snapshot links.
+- 🎨 **Automatic Byte-Order & Endianness Handling:** Automatically detects display and LVGL byte orders (`big_endian` vs `little_endian`) to ensure 100% accurate color reproduction with zero CPU overhead.
+- 🔄 **Automatic Orientation Detection:** Seamlessly inherits display/LVGL rotation without requiring manual YAML configuration.
+- 🧩 **Display Support:** Supports ESP32-S3 RGB panels (`mipi_rgb`) as well as standard SPI displays implementing `DisplayBuffer` (e.g. ST7789, ILI9341).
 
 ---
 
-## Quick Start (Example Configuration)
+## Configuration Reference
 
 ```yaml
 external_components:
@@ -32,25 +36,44 @@ web_server:
 
 screen_mirror:
   id: hmi_mirror
-  display: rpi_disp            # Required: reference to display
+  display: rpi_disp            # Required: reference to display component
   touchscreen: my_touchscreen  # Required for tap simulation (/tap & web mirror clicks)
-  fps: 1                       # Max streaming framerate
-  jpeg_quality: 75             # JPEG quality (1-100)
+  fps: 1.0                     # Max framerate (default: 1.0, range: 0.1 - 10.0)
+  jpeg_quality: 75             # JPEG quality (default: 75, range: 10 - 100)
   gated_streaming: true        # Skip frames when screen has no changes
+  web_path: "/remote"          # Web viewer URL path (default: /remote)
+  show_telemetry: true         # Show latency/device info badge in web viewer
+  rotation: 90                 # Optional: 0, 90, 180, 270 (auto-detected from lvgl/display if omitted)
+  byte_order: big_endian       # Optional: big_endian, little_endian (auto-detected if omitted)
+  core: 0                      # ESP32 CPU core (default: 0)
 ```
 
-> **Note on Touch Simulation:** The `touchscreen:` reference is required for remote tap simulation (`POST /tap` and interactive clicks in `/remote`). Simulated touches are forwarded directly through ESPHome's `Touchscreen` subsystem, executing any user-defined `on_touch:` automations (such as waking displays from sleep) as well as UI touch listeners (like LVGL).
-
-Once flashed, open your browser:
-* **Interactive Web Mirror:** `http://<your-device-ip>/remote`
-* **Direct JPEG Snapshot:** `http://<your-device-ip>/screenshot.jpg`
-* **Direct MJPEG Stream:** `http://<your-device-ip>/stream.mjpeg`
+> **Note on Touch Simulation:** The `touchscreen:` reference is required for remote tap simulation (`POST /tap` and interactive clicks in `/remote`). Simulated touches are dispatched directly through ESPHome's `Touchscreen` subsystem, guaranteeing that display wake-on-touch routines and LVGL event listeners trigger identically to physical screen touches.
 
 ---
 
-## Architecture & Specifications
+## REST Endpoints
 
-For the comprehensive design document, performance benchmarks, and phased roadmap, see [SPEC.md](SPEC.md).
+| Endpoint | Method | Description |
+| :--- | :--- | :--- |
+| `/remote` | `GET` | Interactive web mirror with live preview and touch simulation. |
+| `/screenshot.jpg` | `GET` | Hardware-accelerated JPEG snapshot of current screen. |
+| `/screenshot.bmp` | `GET` | Uncompressed 16-bit RGB565 BMP snapshot. |
+| `/mirror/info` | `GET` | JSON metadata (resolution, rotation, byte order, memory). |
+| `/tap?x=..&y=..` | `POST` | Simulate touch event at raw hardware coordinates `(x, y)` (`duration_ms` optional). |
+
+---
+
+## Roadmap & Upcoming Features
+
+- [x] Phase 1: Core JPEG (`/screenshot.jpg`) and BMP (`/screenshot.bmp`) capture.
+- [x] Phase 2: Touch input simulation (`POST /tap`) via ESPHome `Touchscreen` subsystem.
+- [x] Phase 2.5: Interactive web UI (`/remote`) with auto-rotation, coordinate transformation, and build-time gzip asset embedding.
+- [ ] Phase 3: Continuous multipart MJPEG streaming (`GET /stream.mjpeg`) with dirty-frame gating.
+- [ ] Phase 4: Swipe & drag gestures (`POST /swipe`, continuous touch events).
+- [ ] Phase 5: Tile-based delta blitting via WebSockets for ultra-low bandwidth streaming.
+
+For the comprehensive architectural specification, see [SPEC.md](SPEC.md).
 
 ---
 
