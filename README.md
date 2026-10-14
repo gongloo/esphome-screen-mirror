@@ -71,7 +71,6 @@ screen_mirror:
 - [x] Phase 2.5: Interactive web UI (`/remote`) with auto-rotation, coordinate transformation, and build-time gzip asset embedding.
 - [ ] Phase 3: Swipe & drag gestures (`POST /swipe`, continuous touch dragging).
 - [ ] Phase 4: Tile-based delta blitting via WebSockets for ultra-low bandwidth streaming.
-- [ ] Phase 5: Multi-display & extended peripheral support.
 
 For the comprehensive architectural specification, see [SPEC.md](SPEC.md).
 
