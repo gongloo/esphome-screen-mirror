@@ -24,7 +24,7 @@
 
 To ensure compatibility across hardware, `esphome-screen-mirror` implements a unified **Framebuffer Adapter Interface**:
 
-```
+```text
                   ┌──────────────────────────────────────────────┐
                   │            esphome-screen-mirror             │
                   │   (JPEG Encoder, HTTP Server, Web UI)        │
