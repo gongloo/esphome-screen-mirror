@@ -388,10 +388,10 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
   }
 
   int fd = httpd_req_to_sockfd(req);
+  mirror->add_ws_client(fd);
 
   if (req->method == HTTP_GET) {
     ESP_LOGI(TAG, "WebSocket client handshake established (fd: %d)", fd);
-    mirror->add_ws_client(fd);
     return ESP_OK;
   }
 
@@ -423,7 +423,7 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
   }
 
   ws_pkt.payload = reinterpret_cast<uint8_t *>(buf);
-  ret = httpd_ws_recv_frame(req, &ws_pkt, sizeof(buf) - 1);
+  ret = httpd_ws_recv_frame(req, &ws_pkt, ws_pkt.len);
   if (ret != ESP_OK) {
     ESP_LOGW(TAG, "httpd_ws_recv_frame failed to receive payload: %d", ret);
     mirror->remove_ws_client(fd);
@@ -499,7 +499,7 @@ bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload
           fd_set wset;
           FD_ZERO(&wset);
           FD_SET(sockfd, &wset);
-          struct timeval tv = {.tv_sec = 0, .tv_usec = 250000};
+          struct timeval tv = {.tv_sec = 2, .tv_usec = 500000};
           int sel = select(sockfd + 1, nullptr, &wset, nullptr, &tv);
           if (sel > 0) {
             continue;
