@@ -96,6 +96,10 @@
     let pollingActive = true;
 
     function refreshScreen(manual = false) {
+      if (manual && wsConnected && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send('K');
+        return Promise.resolve();
+      }
       if (isRefreshing && !manual) return Promise.resolve();
       isRefreshing = true;
       const reqTime = performance.now();
@@ -126,22 +130,22 @@
       }
     }
 
-    function drawRotated(img) {
-      const w = img.naturalWidth || hwWidth;
-      const h = img.naturalHeight || hwHeight;
-
+    function ensureCanvasSize() {
       if (rotation === 90 || rotation === 270) {
-        if (canvas.width !== h || canvas.height !== w) {
-          canvas.width = h;
-          canvas.height = w;
+        if (canvas.width !== hwHeight || canvas.height !== hwWidth) {
+          canvas.width = hwHeight;
+          canvas.height = hwWidth;
         }
       } else {
-        if (canvas.width !== w || canvas.height !== h) {
-          canvas.width = w;
-          canvas.height = h;
+        if (canvas.width !== hwWidth || canvas.height !== hwHeight) {
+          canvas.width = hwWidth;
+          canvas.height = hwHeight;
         }
       }
+    }
 
+    function drawTile(img, x, y, w, h) {
+      ensureCanvasSize();
       ctx.save();
       if (rotation === 90) {
         // 90 deg CCW (270 deg) brings the buffer upright
@@ -154,8 +158,12 @@
         ctx.translate(canvas.width, 0);
         ctx.rotate(90 * Math.PI / 180);
       }
-      ctx.drawImage(img, 0, 0);
+      ctx.drawImage(img, x, y);
       ctx.restore();
+    }
+
+    function drawRotated(img) {
+      drawTile(img, 0, 0, hwWidth, hwHeight);
     }
 
     function clientToRaw(clientX, clientY) {
@@ -199,26 +207,90 @@
 
     let ws = null;
     let wsConnected = false;
+    let frameTimes = [];
+
+    function updateFpsCounter() {
+      const now = performance.now();
+      frameTimes.push(now);
+      while (frameTimes.length > 0 && frameTimes[0] < now - 1000) {
+        frameTimes.shift();
+      }
+      const lat = document.getElementById('lat');
+      if (lat && frameTimes.length > 0) {
+        lat.textContent = `${frameTimes.length} fps`;
+      }
+    }
 
     function initWebSocket() {
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${location.host}/ws`;
       try {
         ws = new WebSocket(wsUrl);
+        ws.binaryType = 'arraybuffer';
         ws.onopen = () => {
           wsConnected = true;
           const stat = document.getElementById('stat');
           if (stat) stat.textContent = 'WS Connected';
+          const mode = document.getElementById('mode');
+          if (mode) mode.textContent = 'Delta WS (LVGL)';
+          // Suspend HTTP polling because WebSocket pushes dirty tile updates
+          pollingActive = false;
         };
         ws.onclose = () => {
           wsConnected = false;
           const stat = document.getElementById('stat');
           if (stat) stat.textContent = 'HTTP Fallback';
+          const mode = document.getElementById('mode');
+          if (mode) mode.textContent = 'Live Mirror';
+          // Resume HTTP polling if WebSocket closes
+          if (!pollingActive) {
+            pollingActive = true;
+            startContinuousPolling();
+          }
           setTimeout(initWebSocket, 2000);
         };
         ws.onerror = () => {
           wsConnected = false;
           ws.close();
+        };
+        ws.onmessage = async (event) => {
+          if (typeof event.data === 'string') return;
+          if (!(event.data instanceof ArrayBuffer)) return;
+
+          const buf = event.data;
+          if (buf.byteLength < 10) return;
+
+          const view = new DataView(buf);
+          const magic = view.getUint8(0);
+          const flags = view.getUint8(1);
+          const x = (view.getUint8(2) << 8) | view.getUint8(3);
+          const y = (view.getUint8(4) << 8) | view.getUint8(5);
+          const w = (view.getUint8(6) << 8) | view.getUint8(7);
+          const h = (view.getUint8(8) << 8) | view.getUint8(9);
+
+          const jpegSlice = buf.slice(10);
+          const blob = new Blob([jpegSlice], { type: 'image/jpeg' });
+
+          const renderTile = (imgSource) => {
+            drawTile(imgSource, x, y, w, h);
+            updateFpsCounter();
+          };
+
+          if (window.createImageBitmap) {
+            try {
+              const bmp = await createImageBitmap(blob);
+              renderTile(bmp);
+              bmp.close();
+              return;
+            } catch (e) {}
+          }
+
+          const img = new Image();
+          img.onload = () => {
+            renderTile(img);
+            URL.revokeObjectURL(img.src);
+          };
+          img.src = URL.createObjectURL(blob);
         };
       } catch (e) {
         wsConnected = false;

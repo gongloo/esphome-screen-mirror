@@ -18,6 +18,14 @@
 #include "esphome/components/display/display_buffer.h"
 #endif
 
+#if __has_include(<lvgl.h>)
+#include <lvgl.h>
+#define HAS_LVGL 1
+#elif defined(USE_LVGL)
+#include <lvgl.h>
+#define HAS_LVGL 1
+#endif
+
 namespace esphome {
 namespace screen_mirror {
 
@@ -58,6 +66,19 @@ void ScreenMirrorComponent::setup() {
   } else {
     ESP_LOGI(TAG, "Allocated %u KB JPEG working buffer in PSRAM", (unsigned)(this->jpeg_buffer_size_ / 1024));
   }
+
+  // Allocate tile scratch buffer for extracting dirty sub-rectangles (128 KB in PSRAM)
+  this->tile_scratch_size_ = 128 * 1024;
+  this->tile_scratch_ = (uint8_t *) heap_caps_malloc(this->tile_scratch_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (this->tile_scratch_ == nullptr) {
+    this->tile_scratch_ = (uint8_t *) malloc(this->tile_scratch_size_);
+  }
+  if (this->tile_scratch_ != nullptr) {
+    ESP_LOGI(TAG, "Allocated %u KB tile extraction scratch buffer in PSRAM", (unsigned)(this->tile_scratch_size_ / 1024));
+  }
+
+  // Install LVGL dirty region invalidation and render-ready hooks
+  this->setup_lvgl_hooks();
 
   if (web_server_base::global_web_server_base == nullptr) {
     ESP_LOGW(TAG, "No web_server_base registered; remote endpoints will be unavailable.");
@@ -351,8 +372,18 @@ void ScreenMirrorComponent::setup() {
 
 #if defined(USE_ESP32) && defined(CONFIG_HTTPD_WS_SUPPORT)
 esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
+  auto *mirror = static_cast<ScreenMirrorComponent *>(req->user_ctx);
+  if (mirror == nullptr) {
+    return ESP_OK;
+  }
+
+  int fd = httpd_req_to_sockfd(req);
+
   if (req->method == HTTP_GET) {
-    ESP_LOGD(TAG, "WebSocket client handshake established");
+    ESP_LOGI(TAG, "WebSocket client handshake established (fd: %d)", fd);
+    mirror->add_ws_client(fd);
+    // Push full frame keyframe so browser canvas is immediately initialized
+    mirror->send_full_keyframe(fd);
     return ESP_OK;
   }
 
@@ -363,14 +394,20 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
   esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, 0);
   if (ret != ESP_OK) {
     ESP_LOGW(TAG, "httpd_ws_recv_frame failed to get frame length: %d", ret);
+    mirror->remove_ws_client(fd);
     return ret;
+  }
+
+  if (ws_pkt.type == HTTPD_WS_TYPE_CLOSE) {
+    mirror->remove_ws_client(fd);
+    return ESP_OK;
   }
 
   if (ws_pkt.len == 0) {
     return ESP_OK;
   }
 
-  // 2. Read frame payload into stack buffer (touch packets are tiny strings like "D 100 200")
+  // 2. Read frame payload into stack buffer
   char buf[64];
   if (ws_pkt.len >= sizeof(buf)) {
     ESP_LOGW(TAG, "WebSocket payload too large (%zu bytes), ignoring", ws_pkt.len);
@@ -381,19 +418,17 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
   ret = httpd_ws_recv_frame(req, &ws_pkt, sizeof(buf) - 1);
   if (ret != ESP_OK) {
     ESP_LOGW(TAG, "httpd_ws_recv_frame failed to receive payload: %d", ret);
+    mirror->remove_ws_client(fd);
     return ret;
   }
   buf[ws_pkt.len] = '\0';
 
-  auto *mirror = static_cast<ScreenMirrorComponent *>(req->user_ctx);
-  if (mirror == nullptr) {
-    return ESP_OK;
-  }
-
-  // Parse packet: "T <x> <y>", "D <x> <y>", "M <x> <y>", "U" (or "U <x> <y>")
+  // Parse packet: "T <x> <y>", "D <x> <y>", "M <x> <y>", "U" (or "U <x> <y>"), "K" (keyframe request)
   char action_char = buf[0];
   int x = 0, y = 0;
-  if (action_char == 'T' || action_char == 't') {
+  if (action_char == 'K' || action_char == 'k') {
+    mirror->send_full_keyframe(fd);
+  } else if (action_char == 'T' || action_char == 't') {
     if (sscanf(buf + 1, "%d %d", &x, &y) == 2) {
       mirror->simulate_tap(x, y, 180);
     }
@@ -416,6 +451,275 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 #endif
+
+void ScreenMirrorComponent::add_ws_client(int fd) {
+  std::lock_guard<std::mutex> lock(this->ws_mutex_);
+  if (std::find(this->ws_client_fds_.begin(), this->ws_client_fds_.end(), fd) == this->ws_client_fds_.end()) {
+    this->ws_client_fds_.push_back(fd);
+    ESP_LOGI(TAG, "WebSocket client registered (fd: %d, total active: %zu)", fd, this->ws_client_fds_.size());
+  }
+}
+
+void ScreenMirrorComponent::remove_ws_client(int fd) {
+  std::lock_guard<std::mutex> lock(this->ws_mutex_);
+  auto it = std::find(this->ws_client_fds_.begin(), this->ws_client_fds_.end(), fd);
+  if (it != this->ws_client_fds_.end()) {
+    this->ws_client_fds_.erase(it);
+    ESP_LOGI(TAG, "WebSocket client removed (fd: %d, total active: %zu)", fd, this->ws_client_fds_.size());
+  }
+}
+
+void ScreenMirrorComponent::setup_lvgl_hooks() {
+#if defined(HAS_LVGL)
+  lv_display_t *disp = lv_display_get_default();
+  if (disp == nullptr) {
+    ESP_LOGW(TAG, "No default LVGL display found; delta region streaming unavailable");
+    return;
+  }
+
+  // 1. Hook invalidation events: accumulates bounding box of dirty areas
+  lv_display_add_event_cb(disp, [](lv_event_t *e) {
+    auto *mirror = static_cast<ScreenMirrorComponent *>(lv_event_get_user_data(e));
+    if (mirror == nullptr) return;
+    auto *area = lv_event_get_invalidated_area(e);
+    if (area == nullptr) return;
+
+    int x1 = area->x1;
+    int y1 = area->y1;
+    int x2 = area->x2;
+    int y2 = area->y2;
+
+    int hw_w = (mirror->display_ != nullptr) ? mirror->display_->get_native_width() : 800;
+    int hw_h = (mirror->display_ != nullptr) ? mirror->display_->get_native_height() : 480;
+
+    int native_x1 = x1, native_y1 = y1, native_x2 = x2, native_y2 = y2;
+    uint16_t rot = mirror->get_rotation();
+
+    if (rot == 90) {
+      native_x1 = hw_w - y2 - 1;
+      native_x2 = hw_w - y1 - 1;
+      native_y1 = x1;
+      native_y2 = x2;
+    } else if (rot == 180) {
+      native_x1 = hw_w - x2 - 1;
+      native_x2 = hw_w - x1 - 1;
+      native_y1 = hw_h - y2 - 1;
+      native_y2 = hw_h - y1 - 1;
+    } else if (rot == 270) {
+      native_x1 = y1;
+      native_x2 = y2;
+      native_y1 = hw_h - x2 - 1;
+      native_y2 = hw_h - x1 - 1;
+    }
+
+    if (native_x1 > native_x2) std::swap(native_x1, native_x2);
+    if (native_y1 > native_y2) std::swap(native_y1, native_y2);
+
+    mirror->add_dirty_area(native_x1, native_y1, native_x2, native_y2);
+  }, LV_EVENT_INVALIDATE_AREA, this);
+
+  // 2. Hook render-ready event: signals that flushed pixels are on hardware scanout
+  lv_display_add_event_cb(disp, [](lv_event_t *e) {
+    auto *mirror = static_cast<ScreenMirrorComponent *>(lv_event_get_user_data(e));
+    if (mirror != nullptr) {
+      mirror->on_lvgl_render_ready();
+    }
+  }, LV_EVENT_REFR_READY, this);
+
+  this->lvgl_hooked_ = true;
+  ESP_LOGI(TAG, "LVGL dirty region hooks installed successfully");
+#endif
+}
+
+void ScreenMirrorComponent::add_dirty_area(int x1, int y1, int x2, int y2) {
+  int hw_w = (this->display_ != nullptr) ? this->display_->get_native_width() : 800;
+  int hw_h = (this->display_ != nullptr) ? this->display_->get_native_height() : 480;
+
+  x1 = std::max(0, std::min(hw_w - 1, x1));
+  y1 = std::max(0, std::min(hw_h - 1, y1));
+  x2 = std::max(0, std::min(hw_w - 1, x2));
+  y2 = std::max(0, std::min(hw_h - 1, y2));
+
+  // Snap to 16-pixel multiples for JPEG MCU compatibility
+  int snap_x1 = (x1 / 16) * 16;
+  int snap_y1 = (y1 / 16) * 16;
+  int snap_x2 = std::min(hw_w - 1, ((x2 + 16) / 16) * 16 - 1);
+  int snap_y2 = std::min(hw_h - 1, ((y2 + 16) / 16) * 16 - 1);
+
+  if (!this->has_dirty_rect_) {
+    this->dirty_x1_ = snap_x1;
+    this->dirty_y1_ = snap_y1;
+    this->dirty_x2_ = snap_x2;
+    this->dirty_y2_ = snap_y2;
+    this->has_dirty_rect_ = true;
+  } else {
+    this->dirty_x1_ = std::min(this->dirty_x1_, snap_x1);
+    this->dirty_y1_ = std::min(this->dirty_y1_, snap_y1);
+    this->dirty_x2_ = std::max(this->dirty_x2_, snap_x2);
+    this->dirty_y2_ = std::max(this->dirty_y2_, snap_y2);
+  }
+}
+
+void ScreenMirrorComponent::on_lvgl_render_ready() {
+  {
+    std::lock_guard<std::mutex> lock(this->ws_mutex_);
+    if (this->ws_client_fds_.empty()) {
+      this->has_dirty_rect_ = false;
+      return;
+    }
+  }
+  this->pending_lvgl_refresh_ = true;
+}
+
+bool ScreenMirrorComponent::send_dirty_update() {
+  if (!this->has_dirty_rect_)
+    return true;
+
+  int x1 = this->dirty_x1_;
+  int y1 = this->dirty_y1_;
+  int x2 = this->dirty_x2_;
+  int y2 = this->dirty_y2_;
+  this->has_dirty_rect_ = false;
+
+  int w = x2 - x1 + 1;
+  int h = y2 - y1 + 1;
+  if (w <= 0 || h <= 0)
+    return true;
+
+  const uint8_t *raw_buf = nullptr;
+  int hw_w = 0, hw_h = 0;
+  if (!this->capture_frame_rgb565(raw_buf, hw_w, hw_h) || raw_buf == nullptr)
+    return false;
+
+  if (x1 + w > hw_w) w = hw_w - x1;
+  if (y1 + h > hw_h) h = hw_h - y1;
+
+  // If dirty region covers more than 60% of the display, send a full keyframe
+  if ((w * h) >= (hw_w * hw_h * 6 / 10)) {
+    return this->send_full_keyframe(-1);
+  }
+
+  const uint8_t *pixel_src = nullptr;
+  size_t needed_scratch = w * h * 2;
+  if (needed_scratch <= this->tile_scratch_size_ && this->tile_scratch_ != nullptr) {
+    for (int r = 0; r < h; r++) {
+      const uint8_t *src_row = raw_buf + ((y1 + r) * hw_w + x1) * 2;
+      uint8_t *dst_row = this->tile_scratch_ + (r * w) * 2;
+      std::memcpy(dst_row, src_row, w * 2);
+    }
+    pixel_src = this->tile_scratch_;
+  } else {
+    return this->send_full_keyframe(-1);
+  }
+
+  // Encode JPEG into jpeg_buffer_ + 10 (leaving 10 bytes for binary header)
+  uint8_t *jpeg_dest = this->jpeg_buffer_ + 10;
+  size_t max_out = (this->jpeg_buffer_size_ > 10) ? (this->jpeg_buffer_size_ - 10) : 0;
+  size_t out_size = 0;
+  if (!this->encode_jpeg(pixel_src, w, h, jpeg_dest, out_size, max_out) || out_size == 0) {
+    return false;
+  }
+
+  // Fill 10-byte binary header
+  this->jpeg_buffer_[0] = 0x44; // 'D' = Delta
+  this->jpeg_buffer_[1] = 0x00; // flags: 0
+  this->jpeg_buffer_[2] = static_cast<uint8_t>((x1 >> 8) & 0xFF);
+  this->jpeg_buffer_[3] = static_cast<uint8_t>(x1 & 0xFF);
+  this->jpeg_buffer_[4] = static_cast<uint8_t>((y1 >> 8) & 0xFF);
+  this->jpeg_buffer_[5] = static_cast<uint8_t>(y1 & 0xFF);
+  this->jpeg_buffer_[6] = static_cast<uint8_t>((w >> 8) & 0xFF);
+  this->jpeg_buffer_[7] = static_cast<uint8_t>(w & 0xFF);
+  this->jpeg_buffer_[8] = static_cast<uint8_t>((h >> 8) & 0xFF);
+  this->jpeg_buffer_[9] = static_cast<uint8_t>(h & 0xFF);
+
+  size_t total_payload_len = 10 + out_size;
+
+#if defined(USE_ESP32) && defined(CONFIG_HTTPD_WS_SUPPORT)
+  auto *server = web_server_base::global_web_server_base->get_server();
+  if (server != nullptr && server->get_server() != nullptr) {
+    httpd_handle_t hd = server->get_server();
+    httpd_ws_frame_t ws_pkt{};
+    ws_pkt.type = HTTPD_WS_TYPE_BINARY;
+    ws_pkt.payload = this->jpeg_buffer_;
+    ws_pkt.len = total_payload_len;
+
+    std::vector<int> dead_fds;
+    {
+      std::lock_guard<std::mutex> lock(this->ws_mutex_);
+      for (int fd : this->ws_client_fds_) {
+        esp_err_t err = httpd_ws_send_frame_async(hd, fd, &ws_pkt);
+        if (err != ESP_OK) {
+          dead_fds.push_back(fd);
+        }
+      }
+    }
+    for (int dead_fd : dead_fds) {
+      this->remove_ws_client(dead_fd);
+    }
+  }
+#endif
+
+  return true;
+}
+
+bool ScreenMirrorComponent::send_full_keyframe(int target_fd) {
+  const uint8_t *raw_buf = nullptr;
+  int hw_w = 0, hw_h = 0;
+  if (!this->capture_frame_rgb565(raw_buf, hw_w, hw_h) || raw_buf == nullptr)
+    return false;
+
+  uint8_t *jpeg_dest = this->jpeg_buffer_ + 10;
+  size_t max_out = (this->jpeg_buffer_size_ > 10) ? (this->jpeg_buffer_size_ - 10) : 0;
+  size_t out_size = 0;
+  if (!this->encode_jpeg(raw_buf, hw_w, hw_h, jpeg_dest, out_size, max_out) || out_size == 0) {
+    return false;
+  }
+
+  // Fill 10-byte binary header
+  this->jpeg_buffer_[0] = 0x46; // 'F' = Full Keyframe
+  this->jpeg_buffer_[1] = 0x01; // flags: 1 = IS_KEYFRAME
+  this->jpeg_buffer_[2] = 0;
+  this->jpeg_buffer_[3] = 0;
+  this->jpeg_buffer_[4] = 0;
+  this->jpeg_buffer_[5] = 0;
+  this->jpeg_buffer_[6] = static_cast<uint8_t>((hw_w >> 8) & 0xFF);
+  this->jpeg_buffer_[7] = static_cast<uint8_t>(hw_w & 0xFF);
+  this->jpeg_buffer_[8] = static_cast<uint8_t>((hw_h >> 8) & 0xFF);
+  this->jpeg_buffer_[9] = static_cast<uint8_t>(hw_h & 0xFF);
+
+  size_t total_payload_len = 10 + out_size;
+
+#if defined(USE_ESP32) && defined(CONFIG_HTTPD_WS_SUPPORT)
+  auto *server = web_server_base::global_web_server_base->get_server();
+  if (server != nullptr && server->get_server() != nullptr) {
+    httpd_handle_t hd = server->get_server();
+    httpd_ws_frame_t ws_pkt{};
+    ws_pkt.type = HTTPD_WS_TYPE_BINARY;
+    ws_pkt.payload = this->jpeg_buffer_;
+    ws_pkt.len = total_payload_len;
+
+    if (target_fd >= 0) {
+      httpd_ws_send_frame_async(hd, target_fd, &ws_pkt);
+    } else {
+      std::vector<int> dead_fds;
+      {
+        std::lock_guard<std::mutex> lock(this->ws_mutex_);
+        for (int fd : this->ws_client_fds_) {
+          esp_err_t err = httpd_ws_send_frame_async(hd, fd, &ws_pkt);
+          if (err != ESP_OK) {
+            dead_fds.push_back(fd);
+          }
+        }
+      }
+      for (int dead_fd : dead_fds) {
+        this->remove_ws_client(dead_fd);
+      }
+    }
+  }
+#endif
+
+  return true;
+}
 
 void ScreenMirrorComponent::loop() {
 #ifdef USE_TOUCHSCREEN
@@ -442,6 +746,17 @@ void ScreenMirrorComponent::loop() {
     }
   }
 #endif
+
+  // Handle pending LVGL dirty update streaming over WebSocket
+  if (this->pending_lvgl_refresh_ && this->has_dirty_rect_) {
+    uint32_t now = millis();
+    uint32_t min_interval_ms = (this->fps_ > 0.0f) ? static_cast<uint32_t>(1000.0f / this->fps_) : 66;
+    if (now - this->last_frame_time_ >= min_interval_ms) {
+      this->last_frame_time_ = now;
+      this->pending_lvgl_refresh_ = false;
+      this->send_dirty_update();
+    }
+  }
 }
 
 void ScreenMirrorComponent::dump_config() {
@@ -487,9 +802,11 @@ bool ScreenMirrorComponent::capture_frame_rgb565(const uint8_t *&out_buffer, int
 }
 
 bool ScreenMirrorComponent::encode_jpeg(const uint8_t *rgb565_buffer, int width, int height,
-                                        uint8_t *out_jpeg, size_t &out_size) {
+                                        uint8_t *out_jpeg, size_t &out_size, size_t max_out_capacity) {
   if (rgb565_buffer == nullptr || out_jpeg == nullptr || width <= 0 || height <= 0)
     return false;
+
+  size_t capacity = (max_out_capacity > 0) ? max_out_capacity : this->jpeg_buffer_size_;
 
   jpeg_enc_config_t cfg = DEFAULT_JPEG_ENC_CONFIG();
   cfg.width = width;
@@ -509,7 +826,7 @@ bool ScreenMirrorComponent::encode_jpeg(const uint8_t *rgb565_buffer, int width,
   int in_size = width * height * 2;
   int out_len = 0;
   jpeg_error_t err = jpeg_enc_process(enc_handle, (uint8_t *) rgb565_buffer, in_size,
-                                      out_jpeg, (int) this->jpeg_buffer_size_, &out_len);
+                                      out_jpeg, (int) capacity, &out_len);
   jpeg_enc_close(enc_handle);
 
   if (err != JPEG_ERR_OK) {

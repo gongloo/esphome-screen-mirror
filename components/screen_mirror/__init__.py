@@ -39,7 +39,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_TOUCHSCREEN): cv.use_id(touchscreen.Touchscreen),
             cv.Optional(CONF_ROTATION): display.validate_rotation,
             cv.Optional(CONF_BYTE_ORDER): cv.enum(BYTE_ORDER_OPTIONS, lower=True),
-            cv.Optional(CONF_FPS, default=1.0): cv.float_range(min=0.1, max=10.0),
+            cv.Optional(CONF_FPS, default=1.0): cv.float_range(min=0.1, max=30.0),
             cv.Optional(CONF_JPEG_QUALITY, default=75): cv.int_range(min=10, max=100),
             cv.Optional(CONF_GATED_STREAMING, default=True): cv.boolean,
             cv.Optional(CONF_WEB_PATH, default="/remote"): cv.string,

@@ -9,6 +9,8 @@
 #endif
 
 #include "esphome/components/web_server_base/web_server_base.h"
+#include <vector>
+#include <mutex>
 
 namespace esphome {
 namespace screen_mirror {
@@ -39,7 +41,7 @@ class ScreenMirrorComponent : public Component {
 
   // Frame capture and encoding APIs
   bool capture_frame_rgb565(const uint8_t *&out_buffer, int &width, int &height);
-  bool encode_jpeg(const uint8_t *rgb565_buffer, int width, int height, uint8_t *out_jpeg, size_t &out_size);
+  bool encode_jpeg(const uint8_t *rgb565_buffer, int width, int height, uint8_t *out_jpeg, size_t &out_size, size_t max_out_capacity = 0);
   bool build_bmp_header(int width, int height, uint8_t *header_54);
 
   // Input simulation APIs
@@ -47,6 +49,15 @@ class ScreenMirrorComponent : public Component {
   bool simulate_touch(int x, int y, const std::string &action); // "down", "move", "up"
   bool simulate_swipe(int start_x, int start_y, int end_x, int end_y, uint16_t duration_ms = 300);
   void mark_dirty() { this->dirty_ = true; }
+
+  // LVGL dirty tracking & WebSocket tile streaming
+  void setup_lvgl_hooks();
+  void add_dirty_area(int x1, int y1, int x2, int y2);
+  void on_lvgl_render_ready();
+  bool send_dirty_update();
+  bool send_full_keyframe(int target_fd = -1);
+  void add_ws_client(int fd);
+  void remove_ws_client(int fd);
 
 #if defined(USE_ESP32) && defined(CONFIG_HTTPD_WS_SUPPORT)
   static esp_err_t ws_handler(httpd_req_t *req);
@@ -76,6 +87,10 @@ class ScreenMirrorComponent : public Component {
   uint8_t *jpeg_buffer_{nullptr};
   size_t jpeg_buffer_size_{0};
 
+  // Dedicated tile extraction scratch buffer in PSRAM
+  uint8_t *tile_scratch_{nullptr};
+  size_t tile_scratch_size_{0};
+
   // Swipe gesture state
   struct ActiveSwipe {
     bool active{false};
@@ -96,6 +111,19 @@ class ScreenMirrorComponent : public Component {
   int last_touch_y_{0};
   uint32_t last_frame_time_{0};
   uint32_t frame_count_{0};
+
+  // LVGL dirty tracking state
+  bool lvgl_hooked_{false};
+  std::atomic<bool> has_dirty_rect_{false};
+  std::atomic<bool> pending_lvgl_refresh_{false};
+  int dirty_x1_{0};
+  int dirty_y1_{0};
+  int dirty_x2_{0};
+  int dirty_y2_{0};
+
+  // Connected WebSocket client tracking
+  std::vector<int> ws_client_fds_{};
+  std::mutex ws_mutex_{};
 };
 
 }  // namespace screen_mirror
