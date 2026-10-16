@@ -475,9 +475,14 @@ bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload
     hdr_len = 4;
   } else {
     ws_hdr[1] = 127;
-    for (int i = 0; i < 8; i++) {
-      ws_hdr[2 + i] = static_cast<uint8_t>((len >> ((7 - i) * 8)) & 0xFF);
-    }
+    ws_hdr[2] = 0;
+    ws_hdr[3] = 0;
+    ws_hdr[4] = 0;
+    ws_hdr[5] = 0;
+    ws_hdr[6] = static_cast<uint8_t>((len >> 24) & 0xFF);
+    ws_hdr[7] = static_cast<uint8_t>((len >> 16) & 0xFF);
+    ws_hdr[8] = static_cast<uint8_t>((len >> 8) & 0xFF);
+    ws_hdr[9] = static_cast<uint8_t>(len & 0xFF);
     hdr_len = 10;
   }
 
