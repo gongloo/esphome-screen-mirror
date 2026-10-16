@@ -40,8 +40,12 @@ class TouchscreenAccess : public touchscreen::Touchscreen {
 void ScreenMirrorComponent::setup() {
   ESP_LOGCONFIG(TAG, "Setting up Screen Mirror component...");
 
-  int w = (this->display_ != nullptr) ? this->display_->get_width() : 800;
-  int h = (this->display_ != nullptr) ? this->display_->get_height() : 480;
+  if (this->rotation_ == 0 && this->display_ != nullptr) {
+    this->rotation_ = static_cast<uint16_t>(this->display_->get_rotation());
+  }
+
+  int w = (this->display_ != nullptr) ? this->display_->get_native_width() : 800;
+  int h = (this->display_ != nullptr) ? this->display_->get_native_height() : 480;
 
   this->jpeg_buffer_size_ = 256 * 1024; // 256 KB buffer for compressed JPEG
   this->jpeg_buffer_ = (uint8_t *) heap_caps_malloc(this->jpeg_buffer_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -142,8 +146,8 @@ void ScreenMirrorComponent::setup() {
     }
     void handleRequest(AsyncWebServerRequest *request) override {
       char json[256];
-      int w = (this->parent_->display_ != nullptr) ? this->parent_->display_->get_width() : 0;
-      int h = (this->parent_->display_ != nullptr) ? this->parent_->display_->get_height() : 0;
+      int w = (this->parent_->display_ != nullptr) ? this->parent_->display_->get_native_width() : 0;
+      int h = (this->parent_->display_ != nullptr) ? this->parent_->display_->get_native_height() : 0;
       snprintf(json, sizeof(json),
                "{\"width\":%d,\"height\":%d,\"rotation\":%u,\"fps\":%.1f,\"jpeg_quality\":%d,\"gated\":%s}",
                w, h, this->parent_->rotation_, this->parent_->fps_, this->parent_->jpeg_quality_,
@@ -455,8 +459,8 @@ bool ScreenMirrorComponent::capture_frame_rgb565(const uint8_t *&out_buffer, int
   if (this->display_ == nullptr)
     return false;
 
-  width = this->display_->get_width();
-  height = this->display_->get_height();
+  width = this->display_->get_native_width();
+  height = this->display_->get_native_height();
 
 #if __has_include("esphome/components/mipi_rgb/mipi_rgb.h") && __has_include("esp_lcd_panel_rgb.h")
   // For MIPI RGB panels, read the active hardware PSRAM scanout framebuffer
