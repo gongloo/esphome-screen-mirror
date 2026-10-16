@@ -2,6 +2,11 @@
 #include "esphome/core/log.h"
 #include <cstring>
 #include <algorithm>
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <errno.h>
 
 #include <esp_heap_caps.h>
 #include <esp_jpeg_enc.h>
@@ -434,7 +439,7 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
     mirror->send_full_keyframe(fd);
   } else if (action_char == 'T' || action_char == 't') {
     if (sscanf(buf + 1, "%d %d", &x, &y) == 2) {
-      mirror->simulate_tap(x, y, 180);
+      mirror->simulate_tap(x, y, 80);
     }
   } else if (action_char == 'D' || action_char == 'd') {
     if (sscanf(buf + 1, "%d %d", &x, &y) == 2) {
@@ -456,7 +461,62 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
 }
 #endif
 
+bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload, size_t len) {
+  uint8_t ws_hdr[10];
+  size_t hdr_len = 0;
+  ws_hdr[0] = 0x82; // FIN bit (0x80) | Binary opcode (0x02)
+
+  if (len < 126) {
+    ws_hdr[1] = static_cast<uint8_t>(len);
+    hdr_len = 2;
+  } else if (len <= 65535) {
+    ws_hdr[1] = 126;
+    ws_hdr[2] = static_cast<uint8_t>((len >> 8) & 0xFF);
+    ws_hdr[3] = static_cast<uint8_t>(len & 0xFF);
+    hdr_len = 4;
+  } else {
+    ws_hdr[1] = 127;
+    for (int i = 0; i < 8; i++) {
+      ws_hdr[2 + i] = static_cast<uint8_t>((len >> ((7 - i) * 8)) & 0xFF);
+    }
+    hdr_len = 10;
+  }
+
+  auto send_all = [](int sockfd, const uint8_t *data, size_t total) -> bool {
+    size_t sent = 0;
+    while (sent < total) {
+      ssize_t ret = send(sockfd, reinterpret_cast<const char *>(data + sent), total - sent, 0);
+      if (ret > 0) {
+        sent += ret;
+        continue;
+      }
+      if (ret < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+          fd_set wset;
+          FD_ZERO(&wset);
+          FD_SET(sockfd, &wset);
+          struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
+          int sel = select(sockfd + 1, nullptr, &wset, nullptr, &tv);
+          if (sel > 0) {
+            continue;
+          }
+        }
+        return false;
+      }
+      return false; // ret == 0 (closed)
+    }
+    return true;
+  };
+
+  if (!send_all(fd, ws_hdr, hdr_len))
+    return false;
+  return send_all(fd, payload, len);
+}
+
 void ScreenMirrorComponent::add_ws_client(int fd) {
+  int nodelay = 1;
+  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (char *) &nodelay, sizeof(nodelay));
+
   std::lock_guard<std::mutex> lock(this->ws_mutex_);
   if (std::find(this->ws_client_fds_.begin(), this->ws_client_fds_.end(), fd) == this->ws_client_fds_.end()) {
     this->ws_client_fds_.push_back(fd);
@@ -637,21 +697,17 @@ bool ScreenMirrorComponent::send_dirty_update() {
   size_t total_payload_len = 10 + out_size;
 
 #if defined(USE_ESP32) && defined(CONFIG_HTTPD_WS_SUPPORT)
-  auto *server = web_server_base::global_web_server_base->get_server();
-  if (server != nullptr && server->get_server() != nullptr) {
-    httpd_handle_t hd = server->get_server();
-    httpd_ws_frame_t ws_pkt{};
-    ws_pkt.type = HTTPD_WS_TYPE_BINARY;
-    ws_pkt.payload = this->jpeg_buffer_;
-    ws_pkt.len = total_payload_len;
-
+  std::vector<int> dead_fds;
+  {
     std::lock_guard<std::mutex> lock(this->ws_mutex_);
     for (int fd : this->ws_client_fds_) {
-      esp_err_t err = httpd_ws_send_frame_async(hd, fd, &ws_pkt);
-      if (err != ESP_OK) {
-        ESP_LOGD(TAG, "httpd_ws_send_frame_async dirty frame to fd %d returned %d", fd, err);
+      if (!this->send_ws_binary_packet(fd, this->jpeg_buffer_, total_payload_len)) {
+        dead_fds.push_back(fd);
       }
     }
+  }
+  for (int dead_fd : dead_fds) {
+    this->remove_ws_client(dead_fd);
   }
 #endif
 
@@ -687,25 +743,23 @@ bool ScreenMirrorComponent::send_full_keyframe(int target_fd) {
   size_t total_payload_len = 10 + out_size;
 
 #if defined(USE_ESP32) && defined(CONFIG_HTTPD_WS_SUPPORT)
-  auto *server = web_server_base::global_web_server_base->get_server();
-  if (server != nullptr && server->get_server() != nullptr) {
-    httpd_handle_t hd = server->get_server();
-    httpd_ws_frame_t ws_pkt{};
-    ws_pkt.type = HTTPD_WS_TYPE_BINARY;
-    ws_pkt.payload = this->jpeg_buffer_;
-    ws_pkt.len = total_payload_len;
-
+  std::vector<int> dead_fds;
+  {
     std::lock_guard<std::mutex> lock(this->ws_mutex_);
     if (target_fd >= 0) {
-      httpd_ws_send_frame_async(hd, target_fd, &ws_pkt);
+      if (!this->send_ws_binary_packet(target_fd, this->jpeg_buffer_, total_payload_len)) {
+        dead_fds.push_back(target_fd);
+      }
     } else {
       for (int fd : this->ws_client_fds_) {
-        esp_err_t err = httpd_ws_send_frame_async(hd, fd, &ws_pkt);
-        if (err != ESP_OK) {
-          ESP_LOGD(TAG, "httpd_ws_send_frame_async keyframe to fd %d returned %d", fd, err);
+        if (!this->send_ws_binary_packet(fd, this->jpeg_buffer_, total_payload_len)) {
+          dead_fds.push_back(fd);
         }
       }
     }
+  }
+  for (int dead_fd : dead_fds) {
+    this->remove_ws_client(dead_fd);
   }
 #endif
 
@@ -891,7 +945,7 @@ void ScreenMirrorComponent::release_touch_() {
 
 bool ScreenMirrorComponent::simulate_tap(int x, int y, uint16_t duration_ms) {
   if (duration_ms == 0) {
-    duration_ms = 180;
+    duration_ms = 80;
   }
   ESP_LOGD(TAG, "Simulating tap at (%d, %d) for %u ms", x, y, duration_ms);
 

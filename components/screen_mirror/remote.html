@@ -416,7 +416,7 @@
       const duration = performance.now() - pointerStartTime;
 
       if (!downSent && !pointerMoved && duration < 350) {
-        // Crisp single tap/click: tell the device to perform simulated tap (180ms)
+        // Crisp single tap/click: tell the device to perform simulated tap (80ms)
         sendTouch(rawX, rawY, 'tap');
       } else {
         if (!downSent) {
@@ -425,8 +425,6 @@
         }
         sendTouch(rawX, rawY, 'up');
       }
-
-      setTimeout(() => refreshScreen(true), 200);
     };
 
     canvas.addEventListener('pointerup', handlePointerUp);
