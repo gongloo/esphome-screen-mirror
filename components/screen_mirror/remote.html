@@ -253,7 +253,9 @@
           wsConnected = false;
           ws.close();
         };
-        ws.onmessage = async (event) => {
+        let renderChain = Promise.resolve();
+
+        ws.onmessage = (event) => {
           if (typeof event.data === 'string') return;
           if (!(event.data instanceof ArrayBuffer)) return;
 
@@ -268,29 +270,50 @@
           const w = (view.getUint8(6) << 8) | view.getUint8(7);
           const h = (view.getUint8(8) << 8) | view.getUint8(9);
 
+          const packetRot = ((flags >> 2) & 0x03) * 90;
+          if (packetRot !== rotation) {
+            rotation = packetRot;
+            ensureCanvasSize();
+            if (rotSpan) rotSpan.textContent = `${rotation}°`;
+            if (resSpan) {
+              resSpan.textContent = (rotation === 90 || rotation === 270)
+                ? `${hwHeight}×${hwWidth}`
+                : `${hwWidth}×${hwHeight}`;
+            }
+          }
+
           const jpegSlice = buf.slice(10);
           const blob = new Blob([jpegSlice], { type: 'image/jpeg' });
 
           const renderTile = (imgSource) => {
+            if (magic === 0x46 && w > 0 && h > 0) {
+              hwWidth = w;
+              hwHeight = h;
+            }
             drawTile(imgSource, x, y, w, h);
             updateFpsCounter();
           };
 
-          if (window.createImageBitmap) {
+          renderChain = renderChain.then(async () => {
             try {
-              const bmp = await createImageBitmap(blob);
-              renderTile(bmp);
-              bmp.close();
-              return;
+              if (window.createImageBitmap) {
+                const bmp = await createImageBitmap(blob);
+                renderTile(bmp);
+                bmp.close();
+              } else {
+                await new Promise((resolve) => {
+                  const img = new Image();
+                  img.onload = () => {
+                    renderTile(img);
+                    URL.revokeObjectURL(img.src);
+                    resolve();
+                  };
+                  img.onerror = resolve;
+                  img.src = URL.createObjectURL(blob);
+                });
+              }
             } catch (e) {}
-          }
-
-          const img = new Image();
-          img.onload = () => {
-            renderTile(img);
-            URL.revokeObjectURL(img.src);
-          };
-          img.src = URL.createObjectURL(blob);
+          });
         };
       } catch (e) {
         wsConnected = false;

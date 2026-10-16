@@ -114,8 +114,8 @@ class ScreenMirrorComponent : public Component {
 
   // LVGL dirty tracking state
   bool lvgl_hooked_{false};
+  std::mutex dirty_mutex_{};
   std::atomic<bool> has_dirty_rect_{false};
-  std::atomic<bool> pending_lvgl_refresh_{false};
   int dirty_x1_{0};
   int dirty_y1_{0};
   int dirty_x2_{0};

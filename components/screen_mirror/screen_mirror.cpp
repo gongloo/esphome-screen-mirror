@@ -67,9 +67,13 @@ void ScreenMirrorComponent::setup() {
     ESP_LOGI(TAG, "Allocated %u KB JPEG working buffer in PSRAM", (unsigned)(this->jpeg_buffer_size_ / 1024));
   }
 
-  // Allocate tile scratch buffer for extracting dirty sub-rectangles (128 KB in PSRAM)
-  this->tile_scratch_size_ = 128 * 1024;
+  // Allocate tile scratch buffer for extracting dirty sub-rectangles (512 KB in PSRAM, fallback to 128 KB)
+  this->tile_scratch_size_ = 512 * 1024;
   this->tile_scratch_ = (uint8_t *) heap_caps_malloc(this->tile_scratch_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (this->tile_scratch_ == nullptr) {
+    this->tile_scratch_size_ = 128 * 1024;
+    this->tile_scratch_ = (uint8_t *) heap_caps_malloc(this->tile_scratch_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  }
   if (this->tile_scratch_ == nullptr) {
     this->tile_scratch_ = (uint8_t *) malloc(this->tile_scratch_size_);
   }
@@ -477,11 +481,11 @@ void ScreenMirrorComponent::setup_lvgl_hooks() {
     return;
   }
 
-  // 1. Hook invalidation events: accumulates bounding box of dirty areas
+  // Hook flush start events: accumulates bounding box of dirty areas actually being flushed
   lv_display_add_event_cb(disp, [](lv_event_t *e) {
     auto *mirror = static_cast<ScreenMirrorComponent *>(lv_event_get_user_data(e));
     if (mirror == nullptr) return;
-    auto *area = lv_event_get_invalidated_area(e);
+    auto *area = static_cast<const lv_area_t *>(lv_event_get_param(e));
     if (area == nullptr) return;
 
     int x1 = area->x1;
@@ -516,22 +520,15 @@ void ScreenMirrorComponent::setup_lvgl_hooks() {
     if (native_y1 > native_y2) std::swap(native_y1, native_y2);
 
     mirror->add_dirty_area(native_x1, native_y1, native_x2, native_y2);
-  }, LV_EVENT_INVALIDATE_AREA, this);
-
-  // 2. Hook render-ready event: signals that flushed pixels are on hardware scanout
-  lv_display_add_event_cb(disp, [](lv_event_t *e) {
-    auto *mirror = static_cast<ScreenMirrorComponent *>(lv_event_get_user_data(e));
-    if (mirror != nullptr) {
-      mirror->on_lvgl_render_ready();
-    }
-  }, LV_EVENT_REFR_READY, this);
+  }, LV_EVENT_FLUSH_START, this);
 
   this->lvgl_hooked_ = true;
-  ESP_LOGI(TAG, "LVGL dirty region hooks installed successfully");
+  ESP_LOGI(TAG, "LVGL dirty region flush hooks installed successfully");
 #endif
 }
 
 void ScreenMirrorComponent::add_dirty_area(int x1, int y1, int x2, int y2) {
+  std::lock_guard<std::mutex> lock(this->dirty_mutex_);
   int hw_w = (this->display_ != nullptr) ? this->display_->get_native_width() : 800;
   int hw_h = (this->display_ != nullptr) ? this->display_->get_native_height() : 480;
 
@@ -561,25 +558,29 @@ void ScreenMirrorComponent::add_dirty_area(int x1, int y1, int x2, int y2) {
 }
 
 void ScreenMirrorComponent::on_lvgl_render_ready() {
-  {
-    std::lock_guard<std::mutex> lock(this->ws_mutex_);
-    if (this->ws_client_fds_.empty()) {
-      this->has_dirty_rect_ = false;
-      return;
-    }
-  }
-  this->pending_lvgl_refresh_ = true;
 }
 
 bool ScreenMirrorComponent::send_dirty_update() {
-  if (!this->has_dirty_rect_)
-    return true;
+  int x1 = 0, y1 = 0, x2 = 0, y2 = 0;
+  {
+    std::lock_guard<std::mutex> lock(this->dirty_mutex_);
+    if (!this->has_dirty_rect_)
+      return true;
 
-  int x1 = this->dirty_x1_;
-  int y1 = this->dirty_y1_;
-  int x2 = this->dirty_x2_;
-  int y2 = this->dirty_y2_;
-  this->has_dirty_rect_ = false;
+    {
+      std::lock_guard<std::mutex> ws_lock(this->ws_mutex_);
+      if (this->ws_client_fds_.empty()) {
+        this->has_dirty_rect_ = false;
+        return true;
+      }
+    }
+
+    x1 = this->dirty_x1_;
+    y1 = this->dirty_y1_;
+    x2 = this->dirty_x2_;
+    y2 = this->dirty_y2_;
+    this->has_dirty_rect_ = false;
+  }
 
   int w = x2 - x1 + 1;
   int h = y2 - y1 + 1;
@@ -621,8 +622,9 @@ bool ScreenMirrorComponent::send_dirty_update() {
   }
 
   // Fill 10-byte binary header
+  uint8_t rot_code = static_cast<uint8_t>((this->rotation_ / 90) & 0x03);
   this->jpeg_buffer_[0] = 0x44; // 'D' = Delta
-  this->jpeg_buffer_[1] = 0x00; // flags: 0
+  this->jpeg_buffer_[1] = (rot_code << 2); // flags: rotation in bits 2-3, bit 0 = 0 (delta)
   this->jpeg_buffer_[2] = static_cast<uint8_t>((x1 >> 8) & 0xFF);
   this->jpeg_buffer_[3] = static_cast<uint8_t>(x1 & 0xFF);
   this->jpeg_buffer_[4] = static_cast<uint8_t>((y1 >> 8) & 0xFF);
@@ -643,18 +645,12 @@ bool ScreenMirrorComponent::send_dirty_update() {
     ws_pkt.payload = this->jpeg_buffer_;
     ws_pkt.len = total_payload_len;
 
-    std::vector<int> dead_fds;
-    {
-      std::lock_guard<std::mutex> lock(this->ws_mutex_);
-      for (int fd : this->ws_client_fds_) {
-        esp_err_t err = httpd_ws_send_frame_async(hd, fd, &ws_pkt);
-        if (err != ESP_OK) {
-          dead_fds.push_back(fd);
-        }
+    std::lock_guard<std::mutex> lock(this->ws_mutex_);
+    for (int fd : this->ws_client_fds_) {
+      esp_err_t err = httpd_ws_send_frame_async(hd, fd, &ws_pkt);
+      if (err != ESP_OK) {
+        ESP_LOGD(TAG, "httpd_ws_send_frame_async dirty frame to fd %d returned %d", fd, err);
       }
-    }
-    for (int dead_fd : dead_fds) {
-      this->remove_ws_client(dead_fd);
     }
   }
 #endif
@@ -676,8 +672,9 @@ bool ScreenMirrorComponent::send_full_keyframe(int target_fd) {
   }
 
   // Fill 10-byte binary header
+  uint8_t rot_code = static_cast<uint8_t>((this->rotation_ / 90) & 0x03);
   this->jpeg_buffer_[0] = 0x46; // 'F' = Full Keyframe
-  this->jpeg_buffer_[1] = 0x01; // flags: 1 = IS_KEYFRAME
+  this->jpeg_buffer_[1] = (rot_code << 2) | 0x01; // flags: rotation in bits 2-3, bit 0 = 1 (IS_KEYFRAME)
   this->jpeg_buffer_[2] = 0;
   this->jpeg_buffer_[3] = 0;
   this->jpeg_buffer_[4] = 0;
@@ -698,21 +695,15 @@ bool ScreenMirrorComponent::send_full_keyframe(int target_fd) {
     ws_pkt.payload = this->jpeg_buffer_;
     ws_pkt.len = total_payload_len;
 
+    std::lock_guard<std::mutex> lock(this->ws_mutex_);
     if (target_fd >= 0) {
       httpd_ws_send_frame_async(hd, target_fd, &ws_pkt);
     } else {
-      std::vector<int> dead_fds;
-      {
-        std::lock_guard<std::mutex> lock(this->ws_mutex_);
-        for (int fd : this->ws_client_fds_) {
-          esp_err_t err = httpd_ws_send_frame_async(hd, fd, &ws_pkt);
-          if (err != ESP_OK) {
-            dead_fds.push_back(fd);
-          }
+      for (int fd : this->ws_client_fds_) {
+        esp_err_t err = httpd_ws_send_frame_async(hd, fd, &ws_pkt);
+        if (err != ESP_OK) {
+          ESP_LOGD(TAG, "httpd_ws_send_frame_async keyframe to fd %d returned %d", fd, err);
         }
-      }
-      for (int dead_fd : dead_fds) {
-        this->remove_ws_client(dead_fd);
       }
     }
   }
@@ -748,13 +739,21 @@ void ScreenMirrorComponent::loop() {
 #endif
 
   // Handle pending LVGL dirty update streaming over WebSocket
-  if (this->pending_lvgl_refresh_ && this->has_dirty_rect_) {
-    uint32_t now = millis();
-    uint32_t min_interval_ms = (this->fps_ > 0.0f) ? static_cast<uint32_t>(1000.0f / this->fps_) : 66;
-    if (now - this->last_frame_time_ >= min_interval_ms) {
-      this->last_frame_time_ = now;
-      this->pending_lvgl_refresh_ = false;
-      this->send_dirty_update();
+  if (this->has_dirty_rect_) {
+    {
+      std::lock_guard<std::mutex> lock(this->ws_mutex_);
+      if (this->ws_client_fds_.empty()) {
+        std::lock_guard<std::mutex> dirty_lock(this->dirty_mutex_);
+        this->has_dirty_rect_ = false;
+      }
+    }
+    if (this->has_dirty_rect_) {
+      uint32_t now = millis();
+      uint32_t min_interval_ms = (this->fps_ > 0.0f) ? static_cast<uint32_t>(1000.0f / this->fps_) : 66;
+      if (now - this->last_frame_time_ >= min_interval_ms) {
+        this->last_frame_time_ = now;
+        this->send_dirty_update();
+      }
     }
   }
 }
