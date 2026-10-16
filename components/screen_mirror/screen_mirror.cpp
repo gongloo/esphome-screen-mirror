@@ -115,6 +115,7 @@ void ScreenMirrorComponent::setup() {
         return;
       }
 
+      std::lock_guard<std::mutex> jpeg_lock(this->parent_->jpeg_mutex_);
       uint8_t *out_jpeg = this->parent_->get_jpeg_buffer();
       size_t out_size = 0;
       if (!this->parent_->encode_jpeg(raw_buf, width, height, out_jpeg, out_size) || out_size == 0) {
@@ -391,8 +392,6 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
   if (req->method == HTTP_GET) {
     ESP_LOGI(TAG, "WebSocket client handshake established (fd: %d)", fd);
     mirror->add_ws_client(fd);
-    // Push full frame keyframe so browser canvas is immediately initialized
-    mirror->send_full_keyframe(fd);
     return ESP_OK;
   }
 
@@ -485,7 +484,7 @@ bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload
   auto send_all = [](int sockfd, const uint8_t *data, size_t total) -> bool {
     size_t sent = 0;
     while (sent < total) {
-      ssize_t ret = send(sockfd, reinterpret_cast<const char *>(data + sent), total - sent, 0);
+      ssize_t ret = send(sockfd, reinterpret_cast<const char *>(data + sent), total - sent, MSG_DONTWAIT);
       if (ret > 0) {
         sent += ret;
         continue;
@@ -495,7 +494,7 @@ bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload
           fd_set wset;
           FD_ZERO(&wset);
           FD_SET(sockfd, &wset);
-          struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
+          struct timeval tv = {.tv_sec = 0, .tv_usec = 250000};
           int sel = select(sockfd + 1, nullptr, &wset, nullptr, &tv);
           if (sel > 0) {
             continue;
@@ -673,6 +672,8 @@ bool ScreenMirrorComponent::send_dirty_update() {
     return this->send_full_keyframe(-1);
   }
 
+  std::lock_guard<std::mutex> jpeg_lock(this->jpeg_mutex_);
+
   // Encode JPEG into jpeg_buffer_ + 10 (leaving 10 bytes for binary header)
   uint8_t *jpeg_dest = this->jpeg_buffer_ + 10;
   size_t max_out = (this->jpeg_buffer_size_ > 10) ? (this->jpeg_buffer_size_ - 10) : 0;
@@ -719,6 +720,8 @@ bool ScreenMirrorComponent::send_full_keyframe(int target_fd) {
   int hw_w = 0, hw_h = 0;
   if (!this->capture_frame_rgb565(raw_buf, hw_w, hw_h) || raw_buf == nullptr)
     return false;
+
+  std::lock_guard<std::mutex> jpeg_lock(this->jpeg_mutex_);
 
   uint8_t *jpeg_dest = this->jpeg_buffer_ + 10;
   size_t max_out = (this->jpeg_buffer_size_ > 10) ? (this->jpeg_buffer_size_ - 10) : 0;

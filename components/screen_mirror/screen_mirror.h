@@ -125,6 +125,7 @@ class ScreenMirrorComponent : public Component {
   // Connected WebSocket client tracking
   std::vector<int> ws_client_fds_{};
   std::mutex ws_mutex_{};
+  std::mutex jpeg_mutex_{};
 };
 
 }  // namespace screen_mirror

@@ -66,17 +66,35 @@
     const rotSpan = document.getElementById('rot');
 
     let isRefreshing = false;
-    let rotation = 0;
+    let rotation = /*%ROTATION%*/ 0;
     let hwWidth = 800;
     let hwHeight = 480;
+
+    function ensureCanvasSize() {
+      const targetW = (rotation === 90 || rotation === 270) ? hwHeight : hwWidth;
+      const targetH = (rotation === 90 || rotation === 270) ? hwWidth : hwHeight;
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
+      }
+    }
+    ensureCanvasSize();
+    if (rotSpan) rotSpan.textContent = `${rotation}°`;
+    if (resSpan) {
+      resSpan.textContent = (rotation === 90 || rotation === 270)
+        ? `${hwHeight}×${hwWidth}`
+        : `${hwWidth}×${hwHeight}`;
+    }
 
     async function updateInfo() {
       try {
         const res = await fetch('/mirror/info');
         const data = await res.json();
-        hwWidth = data.width || 800;
-        hwHeight = data.height || 480;
-        rotation = data.rotation || 0;
+        hwWidth = data.width || hwWidth;
+        hwHeight = data.height || hwHeight;
+        if (typeof data.rotation === 'number') {
+          rotation = data.rotation;
+        }
         rotSpan.textContent = `${rotation}°`;
 
         if (rotation === 90 || rotation === 270) {
@@ -84,6 +102,7 @@
         } else {
           resSpan.textContent = `${hwWidth}×${hwHeight}`;
         }
+        ensureCanvasSize();
       } catch (e) {}
     }
     updateInfo();
@@ -130,19 +149,6 @@
       }
     }
 
-    function ensureCanvasSize() {
-      if (rotation === 90 || rotation === 270) {
-        if (canvas.width !== hwHeight || canvas.height !== hwWidth) {
-          canvas.width = hwHeight;
-          canvas.height = hwWidth;
-        }
-      } else {
-        if (canvas.width !== hwWidth || canvas.height !== hwHeight) {
-          canvas.width = hwWidth;
-          canvas.height = hwHeight;
-        }
-      }
-    }
 
     function drawTile(img, x, y, w, h) {
       ensureCanvasSize();
@@ -235,6 +241,8 @@
           if (mode) mode.textContent = 'Delta WS (LVGL)';
           // Suspend HTTP polling because WebSocket pushes dirty tile updates
           pollingActive = false;
+          // Request full keyframe once WebSocket handshake is established
+          ws.send('K');
         };
         ws.onclose = () => {
           wsConnected = false;

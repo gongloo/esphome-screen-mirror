@@ -197,8 +197,12 @@ async def to_code(config):
     import os
 
     html_file = os.path.join(os.path.dirname(__file__), "remote.html")
-    with open(html_file, "rb") as f:
-        html_bytes = f.read()
+    with open(html_file, "r", encoding="utf-8") as f:
+        html_text = f.read()
+
+    # Pre-configure default rotation detected from config
+    html_text = html_text.replace("/*%ROTATION%*/ 0", str(rotation))
+    html_bytes = html_text.encode("utf-8")
 
     gzipped = gzip.compress(html_bytes)
     hex_bytes = ", ".join(f"0x{b:02x}" for b in gzipped)
