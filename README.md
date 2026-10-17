@@ -2,6 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![ESPHome External Component](https://img.shields.io/badge/ESPHome-External%20Component-orange.svg)](https://esphome.io)
+[![CI](https://github.com/gongloo/esphome-screen-mirror/actions/workflows/ci.yml/badge.svg)](https://github.com/gongloo/esphome-screen-mirror/actions/workflows/ci.yml)
 
 A lightweight, low-latency screen mirror and remote touch controller for ESPHome displays on the ESP32-S3.
 
