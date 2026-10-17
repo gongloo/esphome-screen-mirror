@@ -61,6 +61,14 @@ class TestScreenMirrorCodegen(unittest.TestCase):
         fv.full_config.set({"display": [{"byte_order": "big_endian"}]})
         self.assertEqual(screen_mirror._detect_byte_order(config), True)
 
+    def test_detect_byte_order_from_display_metadata(self):
+        from esphome.components import display
+        from esphome.core import ID
+        disp_id = ID("disp_be", is_declaration=True, type=display.Display)
+        display.add_metadata(disp_id, 800, 480, byte_order="big_endian")
+        config = {"display": disp_id}
+        self.assertEqual(screen_mirror._detect_byte_order(config), True)
+
     def test_detect_byte_order_fallback(self):
         config = {}
         fv.full_config.set({})

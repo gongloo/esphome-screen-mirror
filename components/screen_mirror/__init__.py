@@ -82,6 +82,18 @@ def _detect_byte_order(config):
         bo = config[CONF_BYTE_ORDER]
         return getattr(bo, "enum_value", bo == "big_endian")
 
+    # 1. Query display metadata from ESPHome display component
+    try:
+        from esphome.components import display
+        metas = display.get_all_display_metadata()
+        disp_id = str(config.get(CONF_DISPLAY, ""))
+        if disp_id in metas:
+            meta = metas[disp_id]
+            if getattr(meta, "byte_order", None) is not None and meta.byte_order is not cv.UNDEFINED:
+                return meta.byte_order == display.BYTE_ORDER_BIG
+    except Exception:
+        pass
+
     import esphome.final_validate as fv
     try:
         full = fv.full_config.get()
