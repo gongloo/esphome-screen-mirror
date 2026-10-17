@@ -702,28 +702,7 @@ void ScreenMirrorComponent::add_dirty_area(int x1, int y1, int x2, int y2) {
   std::lock_guard<std::mutex> lock(this->dirty_mutex_);
   int hw_w = (this->display_ != nullptr) ? this->display_->get_native_width() : 800;
   int hw_h = (this->display_ != nullptr) ? this->display_->get_native_height() : 480;
-
-  clamp_coordinates(x1, y1, hw_w, hw_h);
-  clamp_coordinates(x2, y2, hw_w, hw_h);
-
-  // Snap to 16-pixel multiples for JPEG MCU compatibility
-  int snap_x1 = (x1 / 16) * 16;
-  int snap_y1 = (y1 / 16) * 16;
-  int snap_x2 = std::min(hw_w - 1, ((x2 + 16) / 16) * 16 - 1);
-  int snap_y2 = std::min(hw_h - 1, ((y2 + 16) / 16) * 16 - 1);
-
-  if (!this->has_dirty_rect_) {
-    this->dirty_x1_ = snap_x1;
-    this->dirty_y1_ = snap_y1;
-    this->dirty_x2_ = snap_x2;
-    this->dirty_y2_ = snap_y2;
-    this->has_dirty_rect_ = true;
-  } else {
-    this->dirty_x1_ = std::min(this->dirty_x1_, snap_x1);
-    this->dirty_y1_ = std::min(this->dirty_y1_, snap_y1);
-    this->dirty_x2_ = std::max(this->dirty_x2_, snap_x2);
-    this->dirty_y2_ = std::max(this->dirty_y2_, snap_y2);
-  }
+  this->dirty_tracker_.add(x1, y1, x2, y2, hw_w, hw_h);
 }
 
 void ScreenMirrorComponent::on_lvgl_render_ready() {
@@ -737,7 +716,7 @@ bool ScreenMirrorComponent::send_dirty_update() {
     std::lock_guard<std::mutex> ws_lock(this->ws_mutex_);
     if (this->ws_client_fds_.empty()) {
       std::lock_guard<std::mutex> dirty_lock(this->dirty_mutex_);
-      this->has_dirty_rect_ = false;
+      this->dirty_tracker_.clear();
       return true;
     }
   }
@@ -745,14 +724,8 @@ bool ScreenMirrorComponent::send_dirty_update() {
   int x1 = 0, y1 = 0, x2 = 0, y2 = 0;
   {
     std::lock_guard<std::mutex> lock(this->dirty_mutex_);
-    if (!this->has_dirty_rect_)
+    if (!this->dirty_tracker_.take_dirty(x1, y1, x2, y2))
       return true;
-
-    x1 = this->dirty_x1_;
-    y1 = this->dirty_y1_;
-    x2 = this->dirty_x2_;
-    y2 = this->dirty_y2_;
-    this->has_dirty_rect_ = false;
   }
 
   int w = x2 - x1 + 1;
@@ -773,7 +746,7 @@ bool ScreenMirrorComponent::send_dirty_update() {
   // page navigation or complex animations), escalate to sending a full keyframe rather than
   // extracting and streaming a large partial tile. This prevents visual tearing and reduces
   // tile extraction CPU overhead.
-  if ((w * h) >= (hw_w * hw_h * 6 / 10)) {
+  if (DirtyAreaTracker::should_escalate_to_keyframe(w, h, hw_w, hw_h, 60)) {
     return this->send_full_keyframe(-1);
   }
 
@@ -885,25 +858,17 @@ bool ScreenMirrorComponent::send_full_keyframe(int target_fd) {
 
 void ScreenMirrorComponent::loop() {
 #ifdef USE_TOUCHSCREEN
-  if (this->active_swipe_.active && this->touchscreen_ != nullptr) {
-    uint32_t now = millis();
-    // Step swipe interpolation every 15-20 ms
-    if (now - this->active_swipe_.last_step_time >= 16) {
-      this->active_swipe_.last_step_time = now;
-      uint32_t elapsed = now - this->active_swipe_.start_time;
-
-      if (elapsed >= this->active_swipe_.duration_ms) {
+  if (this->swipe_gesture_.is_active() && this->touchscreen_ != nullptr) {
+    SwipeStepOutput step_out;
+    if (this->swipe_gesture_.step(millis(), step_out)) {
+      if (step_out.is_final) {
         // Final coordinate
-        this->simulate_touch_internal_(this->active_swipe_.end_x, this->active_swipe_.end_y, "move", this->active_touch_client_);
+        this->simulate_touch_internal_(step_out.x, step_out.y, "move", this->active_touch_client_);
         // Release touch
-        this->simulate_touch_internal_(this->active_swipe_.end_x, this->active_swipe_.end_y, "up", this->active_touch_client_);
-        this->active_swipe_.active = false;
-        ESP_LOGD(TAG, "Swipe completed at (%d, %d)", this->active_swipe_.end_x, this->active_swipe_.end_y);
+        this->simulate_touch_internal_(step_out.x, step_out.y, "up", this->active_touch_client_);
+        ESP_LOGD(TAG, "Swipe completed at (%d, %d)", step_out.x, step_out.y);
       } else {
-        float progress = (float) elapsed / (float) this->active_swipe_.duration_ms;
-        int current_x = this->active_swipe_.start_x + (int) ((this->active_swipe_.end_x - this->active_swipe_.start_x) * progress);
-        int current_y = this->active_swipe_.start_y + (int) ((this->active_swipe_.end_y - this->active_swipe_.start_y) * progress);
-        this->simulate_touch_internal_(current_x, current_y, "move", this->active_touch_client_);
+        this->simulate_touch_internal_(step_out.x, step_out.y, "move", this->active_touch_client_);
       }
     }
   }
@@ -916,24 +881,23 @@ void ScreenMirrorComponent::loop() {
     has_clients = !this->ws_client_fds_.empty();
   }
 
-  if (has_clients) {
-    uint32_t now = millis();
-    uint32_t min_interval_ms = (this->fps_ > 0.0f) ? static_cast<uint32_t>(1000.0f / this->fps_) : 66;
-
-    if (!this->gated_streaming_) {
-      if (now - this->last_frame_time_ >= min_interval_ms) {
-        this->last_frame_time_ = now;
-        this->send_full_keyframe(-1);
-      }
-    } else if (this->has_dirty_rect_) {
-      if (now - this->last_frame_time_ >= min_interval_ms) {
-        this->last_frame_time_ = now;
-        this->send_dirty_update();
-      }
-    }
-  } else if (this->has_dirty_rect_) {
+  bool has_dirty = false;
+  {
     std::lock_guard<std::mutex> dirty_lock(this->dirty_mutex_);
-    this->has_dirty_rect_ = false;
+    has_dirty = this->dirty_tracker_.has_dirty();
+  }
+
+  if (has_clients) {
+    FrameAction action = FrameScheduler::evaluate(millis(), this->fps_, this->gated_streaming_,
+                                                  has_dirty, has_clients, this->last_frame_time_);
+    if (action == FrameAction::FULL_KEYFRAME) {
+      this->send_full_keyframe(-1);
+    } else if (action == FrameAction::DIRTY_DELTA) {
+      this->send_dirty_update();
+    }
+  } else if (has_dirty) {
+    std::lock_guard<std::mutex> dirty_lock(this->dirty_mutex_);
+    this->dirty_tracker_.clear();
   }
 }
 
@@ -1237,7 +1201,7 @@ bool ScreenMirrorComponent::simulate_swipe(int start_x, int start_y, int end_x, 
 
   // Marshal swipe initialization to main loop task
   this->defer([this, start_x, start_y, end_x, end_y, duration_ms, client_id]() {
-    if (this->active_swipe_.active || this->is_touch_down_) {
+    if (this->swipe_gesture_.is_active() || this->is_touch_down_) {
       this->release_touch_();
     }
 
@@ -1248,14 +1212,7 @@ bool ScreenMirrorComponent::simulate_swipe(int start_x, int start_y, int end_x, 
     this->simulate_touch_internal_(start_x, start_y, "down", client_id);
 
     // 2. Initialize active swipe state for loop() interpolation
-    this->active_swipe_.start_x = start_x;
-    this->active_swipe_.start_y = start_y;
-    this->active_swipe_.end_x = end_x;
-    this->active_swipe_.end_y = end_y;
-    this->active_swipe_.start_time = millis();
-    this->active_swipe_.duration_ms = duration_ms;
-    this->active_swipe_.last_step_time = millis();
-    this->active_swipe_.active = true;
+    this->swipe_gesture_.start(start_x, start_y, end_x, end_y, duration_ms, millis(), client_id);
   });
 
   return true;

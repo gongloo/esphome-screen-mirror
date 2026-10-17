@@ -16,6 +16,9 @@
 #include "protocol.h"
 #include "touch_lease.h"
 #include "budget_limiter.h"
+#include "swipe_gesture.h"
+#include "dirty_area.h"
+#include "frame_scheduler.h"
 
 namespace esphome {
 namespace screen_mirror {
@@ -108,21 +111,11 @@ class ScreenMirrorComponent : public Component {
   void *keyframe_enc_handle_{nullptr};
 
   // Swipe gesture state
-  struct ActiveSwipe {
-    bool active{false};
-    int start_x{0};
-    int start_y{0};
-    int end_x{0};
-    int end_y{0};
-    uint32_t start_time{0};
-    uint32_t duration_ms{0};
-    uint32_t last_step_time{0};
-  } active_swipe_;
+  SwipeGestureController swipe_gesture_{};
 
   // State tracking
   std::atomic<bool> dirty_{true};
   bool is_touch_down_{false};
-  uint32_t last_touch_down_time_{0};
   int last_touch_x_{0};
   int last_touch_y_{0};
   uint32_t last_frame_time_{0};
@@ -131,11 +124,7 @@ class ScreenMirrorComponent : public Component {
   // LVGL dirty tracking state
   bool lvgl_hooked_{false};
   std::mutex dirty_mutex_{};
-  std::atomic<bool> has_dirty_rect_{false};
-  int dirty_x1_{0};
-  int dirty_y1_{0};
-  int dirty_x2_{0};
-  int dirty_y2_{0};
+  DirtyAreaTracker dirty_tracker_{};
 
   // Connected WebSocket client tracking
   std::vector<int> ws_client_fds_{};
