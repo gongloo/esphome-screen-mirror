@@ -180,6 +180,12 @@ async def to_code(config):
     cg.add(var.set_show_telemetry(config[CONF_SHOW_TELEMETRY]))
     cg.add_define("USE_SCREEN_MIRROR")
 
+    try:
+        from esphome.components import ota
+        ota.request_ota_state_listeners()
+    except Exception:
+        pass
+
     # Preprocess remote.html into PROGMEM byte array header (gzipped)
     import gzip
     import os

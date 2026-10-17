@@ -56,3 +56,24 @@ TEST_CASE("Frame Scheduler: Fallback FPS for 0.0 or negative") {
   CHECK(action == FrameAction::FULL_KEYFRAME);
   CHECK(last_frame_time == 1070);
 }
+
+TEST_CASE("Frame Scheduler: OTA in progress suppresses all frame emission") {
+  uint32_t last_frame_time = 1000;
+  float fps = 30.0f;
+
+  // Even if enough time has passed, dirty rect exists, and clients are connected,
+  // ota_in_progress = true MUST suppress both keyframes and dirty deltas.
+  FrameAction action = FrameScheduler::evaluate(2000, fps, false, false, true, last_frame_time, true);
+  CHECK(action == FrameAction::NONE);
+  CHECK(last_frame_time == 1000);
+
+  action = FrameScheduler::evaluate(2000, fps, true, true, true, last_frame_time, true);
+  CHECK(action == FrameAction::NONE);
+  CHECK(last_frame_time == 1000);
+
+  // Once OTA completes (ota_in_progress = false), scheduling resumes immediately
+  action = FrameScheduler::evaluate(2000, fps, true, true, true, last_frame_time, false);
+  CHECK(action == FrameAction::DIRTY_DELTA);
+  CHECK(last_frame_time == 2000);
+}
+

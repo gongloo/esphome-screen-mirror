@@ -14,8 +14,9 @@ enum class FrameAction {
 class FrameScheduler {
  public:
   static FrameAction evaluate(uint32_t now_ms, float fps, bool gated_streaming,
-                              bool has_dirty_rect, bool has_clients, uint32_t &last_frame_time) {
-    if (!has_clients) {
+                              bool has_dirty_rect, bool has_clients, uint32_t &last_frame_time,
+                              bool ota_in_progress = false) {
+    if (ota_in_progress || !has_clients) {
       return FrameAction::NONE;
     }
 
