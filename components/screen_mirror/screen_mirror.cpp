@@ -519,21 +519,21 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
     mirror->send_full_keyframe(fd);
   } else if (action_char == 'T' || action_char == 't') {
     if (sscanf(buf + 1, "%d %d", &x, &y) == 2) {
-      mirror->simulate_tap(x, y, 80);
+      mirror->simulate_tap(x, y, 80, fd);
     }
   } else if (action_char == 'D' || action_char == 'd') {
     if (sscanf(buf + 1, "%d %d", &x, &y) == 2) {
-      mirror->simulate_touch(x, y, "down");
+      mirror->simulate_touch(x, y, "down", fd);
     }
   } else if (action_char == 'M' || action_char == 'm') {
     if (sscanf(buf + 1, "%d %d", &x, &y) == 2) {
-      mirror->simulate_touch(x, y, "move");
+      mirror->simulate_touch(x, y, "move", fd);
     }
   } else if (action_char == 'U' || action_char == 'u') {
     if (sscanf(buf + 1, "%d %d", &x, &y) == 2) {
-      mirror->simulate_touch(x, y, "up");
+      mirror->simulate_touch(x, y, "up", fd);
     } else {
-      mirror->simulate_touch(0, 0, "up");
+      mirror->simulate_touch(0, 0, "up", fd);
     }
   }
 
@@ -636,6 +636,11 @@ void ScreenMirrorComponent::remove_ws_client(int fd) {
   if (it != this->ws_client_fds_.end()) {
     this->ws_client_fds_.erase(it);
     ESP_LOGI(TAG, "WebSocket client removed (fd: %d, total active: %zu)", fd, this->ws_client_fds_.size());
+  }
+  if (this->active_touch_client_ == fd) {
+    this->defer([this]() {
+      this->release_touch_();
+    });
   }
 }
 
@@ -909,16 +914,16 @@ void ScreenMirrorComponent::loop() {
 
       if (elapsed >= this->active_swipe_.duration_ms) {
         // Final coordinate
-        this->simulate_touch_internal_(this->active_swipe_.end_x, this->active_swipe_.end_y, "move");
+        this->simulate_touch_internal_(this->active_swipe_.end_x, this->active_swipe_.end_y, "move", this->active_touch_client_);
         // Release touch
-        this->simulate_touch_internal_(this->active_swipe_.end_x, this->active_swipe_.end_y, "up");
+        this->simulate_touch_internal_(this->active_swipe_.end_x, this->active_swipe_.end_y, "up", this->active_touch_client_);
         this->active_swipe_.active = false;
         ESP_LOGD(TAG, "Swipe completed at (%d, %d)", this->active_swipe_.end_x, this->active_swipe_.end_y);
       } else {
         float progress = (float) elapsed / (float) this->active_swipe_.duration_ms;
         int current_x = this->active_swipe_.start_x + (int) ((this->active_swipe_.end_x - this->active_swipe_.start_x) * progress);
         int current_y = this->active_swipe_.start_y + (int) ((this->active_swipe_.end_y - this->active_swipe_.start_y) * progress);
-        this->simulate_touch_internal_(current_x, current_y, "move");
+        this->simulate_touch_internal_(current_x, current_y, "move", this->active_touch_client_);
       }
     }
   }
@@ -1114,6 +1119,7 @@ void ScreenMirrorComponent::release_touch_() {
 #ifdef USE_TOUCHSCREEN
   this->cancel_timeout("min_touch_hold");
   this->cancel_timeout("release_tap");
+  this->active_touch_client_ = 0;
   if (this->touchscreen_ != nullptr && this->is_touch_down_) {
     for (auto *listener : TouchscreenAccess::get_listeners(this->touchscreen_)) {
       listener->release();
@@ -1125,7 +1131,7 @@ void ScreenMirrorComponent::release_touch_() {
 #endif
 }
 
-bool ScreenMirrorComponent::simulate_tap(int x, int y, uint16_t duration_ms) {
+bool ScreenMirrorComponent::simulate_tap(int x, int y, uint16_t duration_ms, int client_id) {
   if (duration_ms == 0) {
     duration_ms = 80;
   }
@@ -1141,12 +1147,12 @@ bool ScreenMirrorComponent::simulate_tap(int x, int y, uint16_t duration_ms) {
   y = std::max(0, std::min(hw_h - 1, y));
 
   // Marshal execution to main loop task for LVGL and ESPHome thread safety
-  this->defer([this, x, y, duration_ms]() {
-    ESP_LOGD(TAG, "Executing tap at (%d, %d) for %u ms on main loop", x, y, duration_ms);
+  this->defer([this, x, y, duration_ms, client_id]() {
+    ESP_LOGD(TAG, "Executing tap at (%d, %d) for %u ms on main loop (client %d)", x, y, duration_ms, client_id);
     this->cancel_timeout("release_tap");
     this->cancel_timeout("min_touch_hold");
 
-    this->simulate_touch_internal_(x, y, "down");
+    this->simulate_touch_internal_(x, y, "down", client_id);
     this->set_timeout("release_tap", duration_ms, [this]() {
       this->release_touch_();
     });
@@ -1158,7 +1164,7 @@ bool ScreenMirrorComponent::simulate_tap(int x, int y, uint16_t duration_ms) {
 #endif
 }
 
-bool ScreenMirrorComponent::simulate_touch(int x, int y, const std::string &action) {
+bool ScreenMirrorComponent::simulate_touch(int x, int y, const std::string &action, int client_id) {
 #ifdef USE_TOUCHSCREEN
   if (this->touchscreen_ == nullptr) {
     ESP_LOGW(TAG, "Cannot simulate touch: no touchscreen configured");
@@ -1171,8 +1177,8 @@ bool ScreenMirrorComponent::simulate_touch(int x, int y, const std::string &acti
   y = std::max(0, std::min(hw_h - 1, y));
 
   // Marshal execution to main loop task for LVGL and ESPHome thread safety
-  this->defer([this, x, y, action]() {
-    this->simulate_touch_internal_(x, y, action);
+  this->defer([this, x, y, action, client_id]() {
+    this->simulate_touch_internal_(x, y, action, client_id);
   });
   return true;
 #else
@@ -1180,11 +1186,21 @@ bool ScreenMirrorComponent::simulate_touch(int x, int y, const std::string &acti
 #endif
 }
 
-void ScreenMirrorComponent::simulate_touch_internal_(int x, int y, const std::string &action) {
+void ScreenMirrorComponent::simulate_touch_internal_(int x, int y, const std::string &action, int client_id) {
 #ifdef USE_TOUCHSCREEN
   if (this->touchscreen_ == nullptr) return;
 
+  uint32_t now = millis();
+  const uint32_t lease_timeout_ms = 3000;
+
   if (action == "down") {
+    // If a touch is already held down by another client and lease hasn't expired, reject conflicting touch
+    if (this->is_touch_down_ && this->active_touch_client_ != 0 &&
+        this->active_touch_client_ != client_id && (now - this->last_touch_down_time_ < lease_timeout_ms)) {
+      ESP_LOGD(TAG, "Touch rejected: active lease held by client %d", this->active_touch_client_);
+      return;
+    }
+
     // If a touch was already down, cleanly release it first before starting a new touch
     if (this->is_touch_down_) {
       this->release_touch_();
@@ -1192,7 +1208,8 @@ void ScreenMirrorComponent::simulate_touch_internal_(int x, int y, const std::st
     this->cancel_timeout("min_touch_hold");
     this->cancel_timeout("release_tap");
 
-    this->last_touch_down_time_ = millis();
+    this->active_touch_client_ = client_id;
+    this->last_touch_down_time_ = now;
     this->last_touch_x_ = x;
     this->last_touch_y_ = y;
 
@@ -1221,9 +1238,15 @@ void ScreenMirrorComponent::simulate_touch_internal_(int x, int y, const std::st
   } else if (action == "move") {
     if (!this->is_touch_down_) {
       // If move arrives without preceding down, initialize down state at current coordinate
-      this->simulate_touch_internal_(x, y, "down");
+      this->simulate_touch_internal_(x, y, "down", client_id);
       return;
     }
+    // Only the client holding the lease (or any client after lease expiration) can move
+    if (this->active_touch_client_ != 0 && this->active_touch_client_ != client_id &&
+        (now - this->last_touch_down_time_ < lease_timeout_ms)) {
+      return;
+    }
+
     this->last_touch_x_ = x;
     this->last_touch_y_ = y;
 
@@ -1249,6 +1272,10 @@ void ScreenMirrorComponent::simulate_touch_internal_(int x, int y, const std::st
     if (!this->is_touch_down_) {
       return;
     }
+    if (this->active_touch_client_ != 0 && this->active_touch_client_ != client_id &&
+        (now - this->last_touch_down_time_ < lease_timeout_ms)) {
+      return;
+    }
     uint32_t elapsed = millis() - this->last_touch_down_time_;
     // Design Decision: LVGL Touch Dwell Time Guarantee.
     // Enforce a minimum 180ms touch hold time on the device. Because LVGL's input indev handler
@@ -1271,7 +1298,7 @@ void ScreenMirrorComponent::simulate_touch_internal_(int x, int y, const std::st
 #endif
 }
 
-bool ScreenMirrorComponent::simulate_swipe(int start_x, int start_y, int end_x, int end_y, uint16_t duration_ms) {
+bool ScreenMirrorComponent::simulate_swipe(int start_x, int start_y, int end_x, int end_y, uint16_t duration_ms, int client_id) {
 #ifdef USE_TOUCHSCREEN
   if (this->touchscreen_ == nullptr) {
     ESP_LOGW(TAG, "Cannot simulate swipe: no touchscreen configured");
@@ -1288,16 +1315,16 @@ bool ScreenMirrorComponent::simulate_swipe(int start_x, int start_y, int end_x, 
   duration_ms = std::max<uint16_t>(50, duration_ms);
 
   // Marshal swipe initialization to main loop task
-  this->defer([this, start_x, start_y, end_x, end_y, duration_ms]() {
+  this->defer([this, start_x, start_y, end_x, end_y, duration_ms, client_id]() {
     if (this->active_swipe_.active || this->is_touch_down_) {
       this->release_touch_();
     }
 
-    ESP_LOGD(TAG, "Starting swipe from (%d, %d) to (%d, %d) over %u ms on main loop",
-             start_x, start_y, end_x, end_y, duration_ms);
+    ESP_LOGD(TAG, "Starting swipe from (%d, %d) to (%d, %d) over %u ms on main loop (client %d)",
+             start_x, start_y, end_x, end_y, duration_ms, client_id);
 
     // 1. Initial touch down at start coordinates
-    this->simulate_touch_internal_(start_x, start_y, "down");
+    this->simulate_touch_internal_(start_x, start_y, "down", client_id);
 
     // 2. Initialize active swipe state for loop() interpolation
     this->active_swipe_.start_x = start_x;

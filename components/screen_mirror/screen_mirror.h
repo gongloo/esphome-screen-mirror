@@ -45,9 +45,9 @@ class ScreenMirrorComponent : public Component {
   bool build_bmp_header(int width, int height, uint8_t *header_66);
 
   // Input simulation APIs
-  bool simulate_tap(int x, int y, uint16_t duration_ms = 180);
-  bool simulate_touch(int x, int y, const std::string &action); // "down", "move", "up"
-  bool simulate_swipe(int start_x, int start_y, int end_x, int end_y, uint16_t duration_ms = 300);
+  bool simulate_tap(int x, int y, uint16_t duration_ms = 180, int client_id = 0);
+  bool simulate_touch(int x, int y, const std::string &action, int client_id = 0); // "down", "move", "up"
+  bool simulate_swipe(int start_x, int start_y, int end_x, int end_y, uint16_t duration_ms = 300, int client_id = 0);
   void mark_dirty() { this->dirty_ = true; }
 
   // LVGL dirty tracking & WebSocket tile streaming
@@ -72,7 +72,8 @@ class ScreenMirrorComponent : public Component {
 
  protected:
   void release_touch_();
-  void simulate_touch_internal_(int x, int y, const std::string &action);
+  void simulate_touch_internal_(int x, int y, const std::string &action, int client_id = 0);
+  int active_touch_client_{0};
 
   display::Display *display_{nullptr};
 #ifdef USE_TOUCHSCREEN
