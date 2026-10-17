@@ -274,7 +274,7 @@
         let isDecoding = false;
         let pendingQueue = [];
         const MAX_PENDING = 2;
-        let lastKeyframeRecovery = 0;
+        let lastKeyframeRecovery = -1000;
 
         function requestKeyframeRecovery() {
           const now = performance.now();
