@@ -95,7 +95,6 @@ screen_mirror:
   show_telemetry: true         # Optional: show HUD badge in web viewer (default: true)
   rotation: 90                 # Optional: 0, 90, 180, 270 (auto-detected if omitted)
   byte_order: big_endian       # Optional: big_endian, little_endian (auto-detected if omitted)
-  core: 0                      # Optional: ESP32 CPU core for worker task (default: 0)
 ```
 
 ---

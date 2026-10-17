@@ -23,7 +23,6 @@ CONF_JPEG_QUALITY = "jpeg_quality"
 CONF_GATED_STREAMING = "gated_streaming"
 CONF_WEB_PATH = "web_path"
 CONF_SHOW_TELEMETRY = "show_telemetry"
-CONF_CORE = "core"
 
 BYTE_ORDER_OPTIONS = {
     "little_endian": False,
@@ -45,7 +44,6 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_GATED_STREAMING, default=True): cv.boolean,
             cv.Optional(CONF_WEB_PATH, default="/remote"): cv.string,
             cv.Optional(CONF_SHOW_TELEMETRY, default=True): cv.boolean,
-            cv.Optional(CONF_CORE, default=0): cv.int_range(min=0, max=1),
         }
     ).extend(cv.COMPONENT_SCHEMA),
 )
@@ -167,7 +165,6 @@ async def to_code(config):
     cg.add(var.set_gated_streaming(config[CONF_GATED_STREAMING]))
     cg.add(var.set_web_path(config[CONF_WEB_PATH]))
     cg.add(var.set_show_telemetry(config[CONF_SHOW_TELEMETRY]))
-    cg.add(var.set_core(config[CONF_CORE]))
     cg.add_define("USE_SCREEN_MIRROR")
 
     # Preprocess remote.html into PROGMEM byte array header (gzipped)

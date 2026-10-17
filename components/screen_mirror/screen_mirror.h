@@ -33,7 +33,6 @@ class ScreenMirrorComponent : public Component {
   void set_gated_streaming(bool gated) { this->gated_streaming_ = gated; }
   void set_web_path(const std::string &path) { this->web_path_ = path; }
   void set_show_telemetry(bool show) { this->show_telemetry_ = show; }
-  void set_core(uint8_t core) { this->core_ = core; }
 
   void setup() override;
   void loop() override;
@@ -86,10 +85,6 @@ class ScreenMirrorComponent : public Component {
   bool gated_streaming_{true};
   std::string web_path_{"/remote"};
   bool show_telemetry_{true};
-  // Design Decision: Core Isolation. JPEG compression and streaming run on Core 0 by default,
-  // leaving Core 1 dedicated to LVGL's internal 60 Hz rendering loop and ESPHome sensor routines
-  // to avoid frame drops, input latency, or UI stutter.
-  uint8_t core_{0};
 
   // Dedicated PSRAM buffer for WebSocket streaming encoding
   uint8_t *jpeg_buffer_{nullptr};

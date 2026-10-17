@@ -956,7 +956,6 @@ void ScreenMirrorComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  JPEG Quality: %u", this->jpeg_quality_);
   ESP_LOGCONFIG(TAG, "  Gated Streaming: %s", YESNO(this->gated_streaming_));
   ESP_LOGCONFIG(TAG, "  Web Path: %s", this->web_path_.c_str());
-  ESP_LOGCONFIG(TAG, "  Core: %u", this->core_);
 }
 
 bool ScreenMirrorComponent::capture_frame_rgb565(const uint8_t *&out_buffer, int &width, int &height) {
