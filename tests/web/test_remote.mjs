@@ -95,6 +95,7 @@ function createRemoteContext(canvasRect = { left: 0, top: 0, width: 800, height:
 
   const docListeners = {};
   const winListeners = {};
+  let lastMockImage = null;
 
   const sandbox = {
     document: {
@@ -119,7 +120,14 @@ function createRemoteContext(canvasRect = { left: 0, top: 0, width: 800, height:
       now: () => currentTime,
     },
     WebSocket: MockWebSocket,
-    Image: class MockImage {},
+    Image: class MockImage {
+      constructor() {
+        lastMockImage = this;
+        this.onload = null;
+        this.onerror = null;
+        this.src = '';
+      }
+    },
     Blob: class MockBlob {
       constructor(parts, options) {
         this.parts = parts;
@@ -169,8 +177,23 @@ globalThis.__requestKeyframeRecovery = () => { if (typeof requestKeyframeRecover
       for (const fn of (winListeners[type] || [])) fn(evt);
     },
     getSentWsMessages: () => wsSentMessages,
+    getLastMockImage: () => lastMockImage,
+    sendWsFrame: (targetWs = null, magic = 0x46, rotCode = 0, isKeyframe = true, x = 0, y = 0, w = 800, h = 480) => {
+      const activeWs = targetWs || sandbox.__getWs();
+      if (!activeWs || !activeWs.onmessage) return;
+      const buf = new ArrayBuffer(10 + 20);
+      const view = new DataView(buf);
+      view.setUint8(0, magic);
+      view.setUint8(1, (rotCode << 2) | (isKeyframe ? 1 : 0));
+      view.setUint16(2, x);
+      view.setUint16(4, y);
+      view.setUint16(6, w);
+      view.setUint16(8, h);
+      activeWs.onmessage({ data: buf });
+    },
     setCanvasRect: (rect) => { currentRect = { ...rect }; },
     advanceTime: (ms) => { currentTime += ms; },
+    getTimers: () => [...timers],
     fireTimers: () => {
       const current = [...timers];
       timers = [];
@@ -248,15 +271,16 @@ test('Production remote.html: clientToRaw coordinate math across rotations', () 
 });
 
 test('Production remote.html: sendTouch WebSocket protocol formatting', () => {
-  const { sandbox, getSentWsMessages } = createRemoteContext();
+  const { sandbox, getSentWsMessages, sendWsFrame } = createRemoteContext();
   const sendTouch = sandbox.sendTouch;
   assert.equal(typeof sendTouch, 'function');
 
-  // Trigger WebSocket handshake
+  // Trigger WebSocket handshake and establish stream with keyframe
   sandbox.initWebSocket();
   const ws = sandbox.__getWs();
   assert.ok(ws, 'WebSocket instance must be created');
   ws.onopen();
+  sendWsFrame();
 
   const sent = getSentWsMessages();
   assert.equal(sent[0], 'K', 'Should request keyframe on open');
@@ -314,10 +338,11 @@ test('Production remote.html: WebSocket message parsing and bounded queue backpr
 });
 
 test('Production remote.html: pointer gesture state machine (quick tap vs hold-drag vs move throttling)', () => {
-  const { sandbox, mockCanvas, getSentWsMessages, advanceTime, fireTimers } = createRemoteContext();
+  const { sandbox, mockCanvas, getSentWsMessages, advanceTime, fireTimers, sendWsFrame } = createRemoteContext();
   sandbox.initWebSocket();
   const ws = sandbox.__getWs();
   ws.onopen();
+  sendWsFrame();
 
   // Clear initial 'K' message
   const sent = getSentWsMessages();
@@ -378,10 +403,11 @@ test('Production remote.html: pointer gesture state machine (quick tap vs hold-d
 });
 
 test('Production remote.html: WebSocket disconnect and auto-recovery lifecycle', () => {
-  const { sandbox, elements, getSentWsMessages, advanceTime } = createRemoteContext();
+  const { sandbox, elements, getSentWsMessages, advanceTime, sendWsFrame } = createRemoteContext();
   sandbox.initWebSocket();
   const ws = sandbox.__getWs();
   ws.onopen();
+  sendWsFrame();
 
   const sent = getSentWsMessages();
   assert.equal(sent[0], 'K', 'Keyframe requested on connection');
@@ -396,6 +422,7 @@ test('Production remote.html: WebSocket disconnect and auto-recovery lifecycle',
   sandbox.initWebSocket();
   const newWs = sandbox.__getWs();
   newWs.onopen();
+  sendWsFrame(newWs);
   sent.length = 0;
 
   // Trigger error recovery
@@ -429,13 +456,14 @@ test('Production remote.html: mobile touch and viewport optimizations', () => {
 });
 
 test('Production remote.html: tab visibility lifecycle (background disconnect, auto-recovery on visible, pagehide cleanup)', () => {
-  const { sandbox, elements, dispatchDocEvent, dispatchWinEvent, getSentWsMessages } = createRemoteContext();
+  const { sandbox, elements, dispatchDocEvent, dispatchWinEvent, getSentWsMessages, sendWsFrame } = createRemoteContext();
 
   // 1. Initial state: connected via WebSocket
   sandbox.initWebSocket();
   const ws = sandbox.__getWs();
   assert.ok(ws, 'WebSocket should be initialized');
   ws.onopen();
+  sendWsFrame();
   assert.equal(elements.stat.textContent, 'WS Connected');
 
   // 2. Tab becomes hidden (user switches tab, minimizes Safari, locks screen)
@@ -461,6 +489,7 @@ test('Production remote.html: tab visibility lifecycle (background disconnect, a
   const resumedWs = sandbox.__getWs();
   assert.ok(resumedWs, 'New WebSocket must be created when tab becomes visible');
   resumedWs.onopen();
+  sendWsFrame(resumedWs);
   assert.equal(elements.stat.textContent, 'WS Connected');
   assert.equal(sent[0], 'K', 'Resumed connection must immediately request keyframe K');
 
@@ -476,18 +505,19 @@ test('Production remote.html: screen dimming and banner state transitions ("Conn
   assert.match(htmlContent, /class=["'][^"']*banner[^"']*["']/, 'remote.html must contain banner element');
   assert.match(htmlContent, /\.screen-overlay\s*\{[^}]*position:\s*absolute;/, 'screen-overlay must be positioned absolutely');
 
-  const { sandbox, elements, mockCanvas, dispatchDocEvent, dispatchWinEvent } = createRemoteContext();
+  const { sandbox, elements, mockCanvas, dispatchDocEvent, dispatchWinEvent, sendWsFrame } = createRemoteContext();
 
   // 1. Initial state: dim screen with "Connecting" banner over it
   assert.equal(elements.banner.textContent, 'Connecting', 'Initial banner text must be "Connecting"');
   assert.equal(elements.screenOverlay.style.display, 'flex', 'Initial overlay must be visible');
   assert.equal(mockCanvas.style.filter, 'brightness(0.6)', 'Initial screen canvas must be dimmed');
 
-  // 2. Connected state: banner hidden and dimming removed
+  // 2. Connected state: banner hidden and dimming removed upon receiving first frame
   sandbox.initWebSocket();
   const ws = sandbox.__getWs();
   assert.ok(ws, 'WebSocket instance must exist');
   ws.onopen();
+  sendWsFrame();
   assert.equal(elements.screenOverlay.style.display, 'none', 'Banner overlay must be hidden when connected');
   assert.equal(mockCanvas.style.filter, '', 'Screen dimming must be cleared when connected');
 
@@ -505,10 +535,11 @@ test('Production remote.html: screen dimming and banner state transitions ("Conn
   assert.equal(elements.screenOverlay.style.display, 'flex', 'Banner overlay must be visible when connecting');
   assert.equal(mockCanvas.style.filter, 'brightness(0.6)', 'Screen must be dimmed when connecting');
 
-  // 5. Reconnected: banner hidden and dimming removed
+  // 5. Reconnected: banner hidden and dimming removed upon receiving first frame
   const resumedWs = sandbox.__getWs();
   assert.ok(resumedWs, 'Resumed WebSocket must exist');
   resumedWs.onopen();
+  sendWsFrame(resumedWs);
   assert.equal(elements.screenOverlay.style.display, 'none', 'Banner overlay must be hidden after reconnecting');
   assert.equal(mockCanvas.style.filter, '', 'Screen dimming must be cleared after reconnecting');
 
@@ -517,6 +548,132 @@ test('Production remote.html: screen dimming and banner state transitions ("Conn
   assert.equal(elements.banner.textContent, 'Disconnected', 'Banner must display "Disconnected" on pagehide cleanup');
   assert.equal(elements.screenOverlay.style.display, 'flex', 'Banner overlay must be visible on cleanup');
   assert.equal(mockCanvas.style.filter, 'brightness(0.6)', 'Screen must be dimmed on cleanup');
+});
+
+test('Production remote.html: visible disconnect & HTTP fallback error handling (Connecting banner during OTA)', () => {
+  // Verify increased banner sizing styles
+  assert.match(htmlContent, /font-size:\s*20px;/, 'Banner should have increased font-size (20px)');
+  assert.match(htmlContent, /padding:\s*16px\s+36px;/, 'Banner should have increased padding (16px 36px)');
+
+  const { sandbox, elements, mockCanvas, getLastMockImage, sendWsFrame } = createRemoteContext();
+
+  // 1. Connect via WebSocket and establish stream
+  sandbox.initWebSocket();
+  const ws = sandbox.__getWs();
+  assert.ok(ws);
+  ws.onopen();
+  sendWsFrame();
+  assert.equal(elements.screenOverlay.style.display, 'none');
+
+  // 2. Disconnect while visible (e.g. ESP32 enters OTA and drops client sockets)
+  ws.onclose();
+  assert.equal(elements.banner.textContent, 'Connecting', 'Must show Connecting banner when disconnected while visible');
+  assert.equal(elements.screenOverlay.style.display, 'flex', 'Overlay must be visible when disconnected while visible');
+  assert.equal(mockCanvas.style.filter, 'brightness(0.6)', 'Canvas must be dimmed when disconnected while visible');
+  assert.equal(elements.stat.textContent, 'HTTP Fallback', 'Status shows HTTP Fallback');
+
+  // 3. Trigger HTTP snapshot refresh failure (e.g. HTTP 503 during OTA)
+  const refreshPromise = sandbox.refreshScreen(false);
+  const img1 = getLastMockImage();
+  assert.ok(img1, 'Image instance should be created by refreshScreen');
+  img1.onerror(); // Simulate 503 response
+  return refreshPromise.then(() => {
+    assert.equal(elements.banner.textContent, 'Connecting', 'Must keep Connecting banner on snapshot failure');
+    assert.equal(elements.screenOverlay.style.display, 'flex', 'Overlay must remain visible on snapshot failure');
+    assert.equal(mockCanvas.style.filter, 'brightness(0.6)', 'Canvas must stay dimmed on snapshot failure');
+
+    // 4. Simulate recovery once OTA finishes (HTTP 200 snapshot loads)
+    const recoveryPromise = sandbox.refreshScreen(false);
+    const img2 = getLastMockImage();
+    assert.ok(img2);
+    img2.onload();
+    return recoveryPromise.then(() => {
+      assert.equal(elements.screenOverlay.style.display, 'none', 'Banner overlay must hide when snapshot succeeds');
+      assert.equal(mockCanvas.style.filter, '', 'Canvas dimming must be cleared when snapshot succeeds');
+    });
+  });
+});
+
+test('Production remote.html: first-frame gating prevents "WS Connected" flash on handshake-only disconnects (Option 1)', () => {
+  const { sandbox, elements, mockCanvas, sendWsFrame } = createRemoteContext();
+
+  sandbox.initWebSocket();
+  const ws = sandbox.__getWs();
+  assert.ok(ws, 'WebSocket must be created');
+
+  // 1. Handshake completes (101 Switching Protocols), but NO frame has arrived yet (e.g. during OTA)
+  ws.onopen();
+  assert.equal(elements.banner.textContent, 'Connecting', 'Must remain Connecting upon onopen without frames');
+  assert.equal(elements.screenOverlay.style.display, 'flex', 'Overlay must remain visible');
+  assert.notEqual(elements.stat.textContent, 'WS Connected', 'Status must NOT flash WS Connected');
+
+  // 2. Server drops socket immediately (OTA rejection)
+  ws.onclose();
+  assert.equal(elements.banner.textContent, 'Connecting', 'Must remain Connecting after socket close');
+  assert.equal(elements.screenOverlay.style.display, 'flex', 'Overlay must remain visible');
+  assert.notEqual(elements.stat.textContent, 'WS Connected', 'Status must never have been WS Connected');
+
+  // 3. Reconnection delivers a frame -> transitions to WS Connected
+  sandbox.initWebSocket();
+  const newWs = sandbox.__getWs();
+  newWs.onopen();
+  assert.equal(elements.banner.textContent, 'Connecting', 'Still Connecting until frame arrives');
+  sendWsFrame(newWs); // Keyframe arrives!
+  assert.equal(elements.stat.textContent, 'WS Connected', 'Status transitions to WS Connected once frame arrives');
+  assert.equal(elements.screenOverlay.style.display, 'none', 'Banner overlay hides once frame arrives');
+  assert.equal(mockCanvas.style.filter, '', 'Screen dimming clears once frame arrives');
+});
+
+test('Production remote.html: exponential reconnect backoff on consecutive disconnects (Option 2)', () => {
+  const { sandbox, getTimers, sendWsFrame } = createRemoteContext();
+
+  // 1. Initial attempt
+  sandbox.initWebSocket();
+  const ws1 = sandbox.__getWs();
+  ws1.onopen();
+  ws1.onclose();
+
+  // First backoff delay is 2000ms
+  let timers = getTimers();
+  const reconnectTimer = timers.find((t) => t.delay === 2000);
+  assert.ok(reconnectTimer, 'First reconnect retry should be scheduled at 2000ms');
+  reconnectTimer.fn(); // Trigger retry
+
+  // 2. Second attempt drops without frame
+  const ws2 = sandbox.__getWs();
+  ws2.onopen();
+  ws2.onclose();
+
+  timers = getTimers();
+  assert.equal(timers[timers.length - 1].delay, 4000, 'Second reconnect retry should back off to 4000ms');
+  timers[timers.length - 1].fn();
+
+  // 3. Third attempt drops without frame
+  const ws3 = sandbox.__getWs();
+  ws3.onopen();
+  ws3.onclose();
+
+  timers = getTimers();
+  assert.equal(timers[timers.length - 1].delay, 8000, 'Third reconnect retry should back off to 8000ms');
+  timers[timers.length - 1].fn();
+
+  // 4. Fourth attempt drops without frame -> capped at 16000ms
+  const ws4 = sandbox.__getWs();
+  ws4.onopen();
+  ws4.onclose();
+
+  timers = getTimers();
+  assert.equal(timers[timers.length - 1].delay, 16000, 'Fourth reconnect retry should be capped at 16000ms');
+  timers[timers.length - 1].fn();
+
+  // 5. Successful frame arrival resets backoff
+  const ws5 = sandbox.__getWs();
+  ws5.onopen();
+  sendWsFrame(ws5);
+  ws5.onclose(); // Disconnect after being established
+
+  timers = getTimers();
+  assert.equal(timers[timers.length - 1].delay, 2000, 'Reconnect backoff should reset to 2000ms after successful frame session');
 });
 
 
