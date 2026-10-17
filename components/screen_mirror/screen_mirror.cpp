@@ -185,7 +185,7 @@ void ScreenMirrorComponent::setup() {
         return;
       }
 
-      uint8_t header[54];
+      uint8_t header[66];
       this->parent_->build_bmp_header(width, height, header);
       size_t image_bytes = width * height * 2;
 
@@ -193,12 +193,23 @@ void ScreenMirrorComponent::setup() {
       httpd_resp_set_hdr(*request, "Cache-Control", "no-cache, no-store, must-revalidate");
       httpd_resp_set_hdr(*request, "Access-Control-Allow-Origin", "*");
       if (httpd_resp_send_chunk(*request, reinterpret_cast<const char *>(header), sizeof(header)) == ESP_OK) {
-        const size_t chunk_size = 4096;
+        const size_t chunk_size = 1024;
+        uint8_t swap_chunk[1024];
         size_t offset = 0;
         esp_err_t err = ESP_OK;
         while (offset < image_bytes && err == ESP_OK) {
           size_t to_send = std::min(chunk_size, image_bytes - offset);
-          err = httpd_resp_send_chunk(*request, reinterpret_cast<const char *>(buffer + offset), to_send);
+          const char *send_ptr = nullptr;
+          if (this->parent_->big_endian_) {
+            for (size_t i = 0; i < to_send; i += 2) {
+              swap_chunk[i] = buffer[offset + i + 1];
+              swap_chunk[i + 1] = buffer[offset + i];
+            }
+            send_ptr = reinterpret_cast<const char *>(swap_chunk);
+          } else {
+            send_ptr = reinterpret_cast<const char *>(buffer + offset);
+          }
+          err = httpd_resp_send_chunk(*request, send_ptr, to_send);
           offset += to_send;
         }
         if (err == ESP_OK) {
@@ -977,39 +988,58 @@ bool ScreenMirrorComponent::encode_jpeg(const uint8_t *rgb565_buffer, int width,
   return (out_size > 0);
 }
 
-bool ScreenMirrorComponent::build_bmp_header(int width, int height, uint8_t *header_54) {
-  std::memset(header_54, 0, 54);
+bool ScreenMirrorComponent::build_bmp_header(int width, int height, uint8_t *header_66) {
+  std::memset(header_66, 0, 66);
   uint32_t image_size = width * height * 2;
-  uint32_t file_size = 54 + image_size;
+  uint32_t file_size = 66 + image_size;
 
   // Bitmap File Header (14 bytes)
-  header_54[0] = 'B';
-  header_54[1] = 'M';
-  header_54[2] = (uint8_t)(file_size);
-  header_54[3] = (uint8_t)(file_size >> 8);
-  header_54[4] = (uint8_t)(file_size >> 16);
-  header_54[5] = (uint8_t)(file_size >> 24);
-  header_54[10] = 54; // Data offset
+  header_66[0] = 'B';
+  header_66[1] = 'M';
+  header_66[2] = (uint8_t)(file_size);
+  header_66[3] = (uint8_t)(file_size >> 8);
+  header_66[4] = (uint8_t)(file_size >> 16);
+  header_66[5] = (uint8_t)(file_size >> 24);
+  header_66[10] = 66; // Data offset (14 file header + 40 DIB header + 12 bitmasks)
 
   // DIB Header (BITMAPINFOHEADER - 40 bytes)
-  header_54[14] = 40;
-  header_54[18] = (uint8_t)(width);
-  header_54[19] = (uint8_t)(width >> 8);
-  header_54[20] = (uint8_t)(width >> 16);
-  header_54[21] = (uint8_t)(width >> 24);
+  header_66[14] = 40; // Header size
+  header_66[18] = (uint8_t)(width);
+  header_66[19] = (uint8_t)(width >> 8);
+  header_66[20] = (uint8_t)(width >> 16);
+  header_66[21] = (uint8_t)(width >> 24);
   // Negative height specifies top-down bitmap (origin upper-left)
   int32_t neg_height = -height;
-  header_54[22] = (uint8_t)(neg_height);
-  header_54[23] = (uint8_t)(neg_height >> 8);
-  header_54[24] = (uint8_t)(neg_height >> 16);
-  header_54[25] = (uint8_t)(neg_height >> 24);
-  header_54[26] = 1;  // Planes
-  header_54[28] = 16; // Bits per pixel (RGB565)
-  header_54[30] = 0;  // BI_RGB compression
-  header_54[34] = (uint8_t)(image_size);
-  header_54[35] = (uint8_t)(image_size >> 8);
-  header_54[36] = (uint8_t)(image_size >> 16);
-  header_54[37] = (uint8_t)(image_size >> 24);
+  header_66[22] = (uint8_t)(neg_height);
+  header_66[23] = (uint8_t)(neg_height >> 8);
+  header_66[24] = (uint8_t)(neg_height >> 16);
+  header_66[25] = (uint8_t)(neg_height >> 24);
+  header_66[26] = 1;  // Planes
+  header_66[28] = 16; // Bits per pixel (RGB565)
+  header_66[30] = 3;  // BI_BITFIELDS (required for 16-bit RGB565, value 3)
+  header_66[34] = (uint8_t)(image_size);
+  header_66[35] = (uint8_t)(image_size >> 8);
+  header_66[36] = (uint8_t)(image_size >> 16);
+  header_66[37] = (uint8_t)(image_size >> 24);
+
+  // BI_BITFIELDS RGB channel bitmasks (12 bytes, 3x DWORD little-endian)
+  // Red mask: 0x0000F800 (bits 11-15)
+  header_66[54] = 0x00;
+  header_66[55] = 0xF8;
+  header_66[56] = 0x00;
+  header_66[57] = 0x00;
+
+  // Green mask: 0x000007E0 (bits 5-10)
+  header_66[58] = 0xE0;
+  header_66[59] = 0x07;
+  header_66[60] = 0x00;
+  header_66[61] = 0x00;
+
+  // Blue mask: 0x0000001F (bits 0-4)
+  header_66[62] = 0x1F;
+  header_66[63] = 0x00;
+  header_66[64] = 0x00;
+  header_66[65] = 0x00;
 
   return true;
 }

@@ -43,7 +43,7 @@ class ScreenMirrorComponent : public Component {
   // Frame capture and encoding APIs
   bool capture_frame_rgb565(const uint8_t *&out_buffer, int &width, int &height);
   bool encode_jpeg(const uint8_t *rgb565_buffer, int width, int height, uint8_t *out_jpeg, size_t &out_size, size_t max_out_capacity = 0);
-  bool build_bmp_header(int width, int height, uint8_t *header_54);
+  bool build_bmp_header(int width, int height, uint8_t *header_66);
 
   // Input simulation APIs
   bool simulate_tap(int x, int y, uint16_t duration_ms = 180);
