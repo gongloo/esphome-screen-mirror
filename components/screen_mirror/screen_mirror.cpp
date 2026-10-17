@@ -191,10 +191,23 @@ void ScreenMirrorComponent::setup() {
         return;
       }
 
-      AsyncWebServerResponse *response = request->beginResponse(200, "image/jpeg", out_jpeg, out_size);
-      response->addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-      response->addHeader("Access-Control-Allow-Origin", "*");
-      request->send(response);
+      httpd_resp_set_type(*request, "image/jpeg");
+      httpd_resp_set_hdr(*request, "Cache-Control", "no-cache, no-store, must-revalidate");
+      httpd_resp_set_hdr(*request, "Access-Control-Allow-Origin", "*");
+
+      size_t exif_len = 0;
+      const uint8_t *exif_soi = get_exif_soi_header(this->parent_->get_rotation(), exif_len);
+
+      if (exif_soi != nullptr && exif_len > 0 && out_size >= 2) {
+        // Zero-copy: stream 38-byte SOI+EXIF directly from Flash (.rodata),
+        // then stream remaining JPEG bytes directly from PSRAM (skipping raw SOI).
+        httpd_resp_send_chunk(*request, reinterpret_cast<const char *>(exif_soi), exif_len);
+        httpd_resp_send_chunk(*request, reinterpret_cast<const char *>(out_jpeg + 2), out_size - 2);
+      } else {
+        // No rotation (0°) or unrotated fallback: stream whole JPEG directly from PSRAM
+        httpd_resp_send_chunk(*request, reinterpret_cast<const char *>(out_jpeg), out_size);
+      }
+      httpd_resp_send_chunk(*request, nullptr, 0);
     }
   };
 

@@ -13,6 +13,7 @@
 #include <mutex>
 
 #include "bmp_builder.h"
+#include "exif_builder.h"
 #include "protocol.h"
 #include "touch_lease.h"
 #include "budget_limiter.h"

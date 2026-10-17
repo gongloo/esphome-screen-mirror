@@ -167,7 +167,8 @@
     }
 
     function drawRotated(img) {
-      drawTile(img, 0, 0, hwWidth, hwHeight);
+      // /screenshot.jpg includes EXIF orientation, so browsers auto-orient the image upright (0°, 90°, 180°, 270°)
+      ctx.drawImage(img, 0, 0);
     }
 
     function clientToRaw(clientX, clientY) {
