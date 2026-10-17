@@ -55,6 +55,10 @@ ScreenMirrorComponent::~ScreenMirrorComponent() {
     free(this->jpeg_buffer_);
     this->jpeg_buffer_ = nullptr;
   }
+  if (this->http_jpeg_buffer_ != nullptr) {
+    free(this->http_jpeg_buffer_);
+    this->http_jpeg_buffer_ = nullptr;
+  }
   if (this->tile_scratch_ != nullptr) {
     free(this->tile_scratch_);
     this->tile_scratch_ = nullptr;
@@ -75,16 +79,26 @@ void ScreenMirrorComponent::setup() {
   // Working buffers for JPEG encoding and tile extraction are pre-allocated statically at boot.
   // This guarantees zero dynamic heap allocations per frame during streaming, eliminating heap
   // fragmentation and OOM failures over weeks/months of continuous operation.
-  this->jpeg_buffer_size_ = 256 * 1024; // 256 KB buffer for compressed JPEG
+  this->jpeg_buffer_size_ = 256 * 1024; // 256 KB buffer for compressed WebSocket JPEG frames
   this->jpeg_buffer_ = (uint8_t *) heap_caps_malloc(this->jpeg_buffer_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (this->jpeg_buffer_ == nullptr) {
     this->jpeg_buffer_ = (uint8_t *) malloc(this->jpeg_buffer_size_);
   }
 
   if (this->jpeg_buffer_ == nullptr) {
-    ESP_LOGE(TAG, "Failed to allocate JPEG working buffer!");
+    ESP_LOGE(TAG, "Failed to allocate WebSocket JPEG buffer!");
   } else {
-    ESP_LOGI(TAG, "Allocated %u KB JPEG working buffer in PSRAM", (unsigned)(this->jpeg_buffer_size_ / 1024));
+    ESP_LOGI(TAG, "Allocated %u KB WebSocket JPEG buffer in PSRAM", (unsigned)(this->jpeg_buffer_size_ / 1024));
+  }
+
+  // Allocate dedicated HTTP snapshot buffer to avoid clobbering live WS stream
+  this->http_jpeg_buffer_size_ = 256 * 1024;
+  this->http_jpeg_buffer_ = (uint8_t *) heap_caps_malloc(this->http_jpeg_buffer_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (this->http_jpeg_buffer_ == nullptr) {
+    this->http_jpeg_buffer_ = (uint8_t *) malloc(this->http_jpeg_buffer_size_);
+  }
+  if (this->http_jpeg_buffer_ != nullptr) {
+    ESP_LOGI(TAG, "Allocated %u KB HTTP snapshot JPEG buffer in PSRAM", (unsigned)(this->http_jpeg_buffer_size_ / 1024));
   }
 
   // Allocate tile scratch buffer for extracting dirty sub-rectangles (512 KB in PSRAM, fallback to 128 KB)
@@ -131,9 +145,15 @@ void ScreenMirrorComponent::setup() {
       }
 
       std::lock_guard<std::mutex> jpeg_lock(this->parent_->jpeg_mutex_);
-      uint8_t *out_jpeg = this->parent_->get_jpeg_buffer();
+      uint8_t *out_jpeg = this->parent_->get_http_jpeg_buffer();
+      size_t max_capacity = this->parent_->get_http_jpeg_buffer_size();
+      if (out_jpeg == nullptr || max_capacity == 0) {
+        request->send(503, "text/plain", "Snapshot buffer not allocated");
+        return;
+      }
+
       size_t out_size = 0;
-      if (!this->parent_->encode_jpeg(raw_buf, width, height, out_jpeg, out_size) || out_size == 0) {
+      if (!this->parent_->encode_jpeg(raw_buf, width, height, out_jpeg, out_size, max_capacity) || out_size == 0) {
         request->send(500, "text/plain", "JPEG encoding failed");
         return;
       }

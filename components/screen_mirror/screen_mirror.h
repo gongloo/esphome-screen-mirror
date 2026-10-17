@@ -68,6 +68,8 @@ class ScreenMirrorComponent : public Component {
   // Buffer accessors
   uint8_t *get_jpeg_buffer() { return this->jpeg_buffer_; }
   size_t get_jpeg_buffer_size() const { return this->jpeg_buffer_size_; }
+  uint8_t *get_http_jpeg_buffer() { return this->http_jpeg_buffer_; }
+  size_t get_http_jpeg_buffer_size() const { return this->http_jpeg_buffer_size_; }
 
  protected:
   void release_touch_();
@@ -88,9 +90,13 @@ class ScreenMirrorComponent : public Component {
   // to avoid frame drops, input latency, or UI stutter.
   uint8_t core_{0};
 
-  // Dedicated PSRAM buffer for zero-fragmentation encoding
+  // Dedicated PSRAM buffer for WebSocket streaming encoding
   uint8_t *jpeg_buffer_{nullptr};
   size_t jpeg_buffer_size_{0};
+
+  // Dedicated PSRAM buffer for HTTP snapshots to eliminate buffer contention with WS streaming
+  uint8_t *http_jpeg_buffer_{nullptr};
+  size_t http_jpeg_buffer_size_{0};
 
   // Dedicated tile extraction scratch buffer in PSRAM
   uint8_t *tile_scratch_{nullptr};
