@@ -7,7 +7,7 @@ ifneq ($(BREW_PREFIX),)
 	CXXFLAGS += -I$(BREW_PREFIX)/include
 endif
 
-SRCS = test_main.cpp test_bmp_header.cpp test_protocol.cpp test_touch_lease.cpp test_budget.cpp
+SRCS = test_main.cpp test_bmp_header.cpp test_protocol.cpp test_touch_lease.cpp test_budget.cpp test_ws_parse.cpp test_clamping.cpp
 OBJS = $(SRCS:.cpp=.o)
 TARGET = test_runner
 
