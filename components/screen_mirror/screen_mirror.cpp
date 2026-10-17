@@ -51,6 +51,10 @@ class TouchscreenAccess : public touchscreen::Touchscreen {
 #endif
 
 ScreenMirrorComponent::~ScreenMirrorComponent() {
+  if (this->keyframe_enc_handle_ != nullptr) {
+    jpeg_enc_close(static_cast<jpeg_enc_handle_t>(this->keyframe_enc_handle_));
+    this->keyframe_enc_handle_ = nullptr;
+  }
   if (this->jpeg_buffer_ != nullptr) {
     free(this->jpeg_buffer_);
     this->jpeg_buffer_ = nullptr;
@@ -117,6 +121,23 @@ void ScreenMirrorComponent::setup() {
 
   // Install LVGL dirty region invalidation and render-ready hooks
   this->setup_lvgl_hooks();
+
+  // Initialize persistent JPEG encoder handle for full keyframes (fixed native width & height)
+  jpeg_enc_config_t keyframe_cfg = DEFAULT_JPEG_ENC_CONFIG();
+  keyframe_cfg.width = w;
+  keyframe_cfg.height = h;
+  keyframe_cfg.src_type = this->big_endian_ ? JPEG_PIXEL_FORMAT_RGB565_BE : JPEG_PIXEL_FORMAT_RGB565_LE;
+  keyframe_cfg.subsampling = JPEG_SUBSAMPLE_420;
+  keyframe_cfg.quality = this->jpeg_quality_;
+  keyframe_cfg.task_enable = false;
+
+  jpeg_enc_handle_t kf_handle = nullptr;
+  if (jpeg_enc_open(&keyframe_cfg, &kf_handle) == JPEG_ERR_OK && kf_handle != nullptr) {
+    this->keyframe_enc_handle_ = kf_handle;
+    ESP_LOGI(TAG, "Persistent keyframe JPEG encoder initialized (%dx%d, Q%u)", w, h, this->jpeg_quality_);
+  } else {
+    ESP_LOGW(TAG, "Failed to initialize persistent keyframe JPEG encoder; will fallback to per-frame open");
+  }
 
   if (web_server_base::global_web_server_base == nullptr) {
     ESP_LOGW(TAG, "No web_server_base registered; remote endpoints will be unavailable.");
@@ -978,27 +999,48 @@ bool ScreenMirrorComponent::encode_jpeg(const uint8_t *rgb565_buffer, int width,
     return false;
 
   size_t capacity = (max_out_capacity > 0) ? max_out_capacity : this->jpeg_buffer_size_;
+  int native_w = (this->display_ != nullptr) ? this->display_->get_native_width() : 800;
+  int native_h = (this->display_ != nullptr) ? this->display_->get_native_height() : 480;
 
-  jpeg_enc_config_t cfg = DEFAULT_JPEG_ENC_CONFIG();
-  cfg.width = width;
-  cfg.height = height;
-  cfg.src_type = this->big_endian_ ? JPEG_PIXEL_FORMAT_RGB565_BE : JPEG_PIXEL_FORMAT_RGB565_LE;
-  cfg.subsampling = JPEG_SUBSAMPLE_420;
-  cfg.quality = this->jpeg_quality_;
-  cfg.task_enable = false; // Mono-task mode: runs synchronously on current thread, ~10KB DRAM
+  bool is_full_frame = (width == native_w && height == native_h);
 
   jpeg_enc_handle_t enc_handle = nullptr;
-  jpeg_error_t open_err = jpeg_enc_open(&cfg, &enc_handle);
-  if (open_err != JPEG_ERR_OK || enc_handle == nullptr) {
-    ESP_LOGE(TAG, "jpeg_enc_open failed: %d", open_err);
-    return false;
+  bool is_persistent = false;
+
+  if (is_full_frame && this->keyframe_enc_handle_ != nullptr) {
+    enc_handle = static_cast<jpeg_enc_handle_t>(this->keyframe_enc_handle_);
+    is_persistent = true;
+  } else {
+    // Dynamic tile: apply pre-flight internal DRAM guard (require at least 35 KB free internal memory)
+    size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (free_internal < 35 * 1024) {
+      ESP_LOGW(TAG, "Skipping tile encode: low internal DRAM (%zu bytes free)", free_internal);
+      return false;
+    }
+
+    jpeg_enc_config_t cfg = DEFAULT_JPEG_ENC_CONFIG();
+    cfg.width = width;
+    cfg.height = height;
+    cfg.src_type = this->big_endian_ ? JPEG_PIXEL_FORMAT_RGB565_BE : JPEG_PIXEL_FORMAT_RGB565_LE;
+    cfg.subsampling = JPEG_SUBSAMPLE_420;
+    cfg.quality = this->jpeg_quality_;
+    cfg.task_enable = false;
+
+    jpeg_error_t open_err = jpeg_enc_open(&cfg, &enc_handle);
+    if (open_err != JPEG_ERR_OK || enc_handle == nullptr) {
+      ESP_LOGE(TAG, "jpeg_enc_open failed for tile (%dx%d): %d", width, height, open_err);
+      return false;
+    }
   }
 
   int in_size = width * height * 2;
   int out_len = 0;
   jpeg_error_t err = jpeg_enc_process(enc_handle, (uint8_t *) rgb565_buffer, in_size,
                                       out_jpeg, (int) capacity, &out_len);
-  jpeg_enc_close(enc_handle);
+
+  if (!is_persistent) {
+    jpeg_enc_close(enc_handle);
+  }
 
   if (err != JPEG_ERR_OK) {
     ESP_LOGE(TAG, "jpeg_enc_process failed: %d", err);

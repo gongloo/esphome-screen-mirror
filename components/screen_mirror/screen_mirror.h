@@ -103,6 +103,9 @@ class ScreenMirrorComponent : public Component {
   uint8_t *tile_scratch_{nullptr};
   size_t tile_scratch_size_{0};
 
+  // Persistent JPEG encoder handle for full keyframes (fixed native width/height)
+  void *keyframe_enc_handle_{nullptr};
+
   // Swipe gesture state
   struct ActiveSwipe {
     bool active{false};
