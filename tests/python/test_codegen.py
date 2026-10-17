@@ -90,6 +90,32 @@ class TestScreenMirrorCodegen(unittest.TestCase):
         validated = screen_mirror._final_validate(config)
         self.assertEqual(validated.get("rotation"), 270)
 
+    def test_detect_rotation_lvgl_precedence_over_display(self):
+        config = {}
+        fv.full_config.set({
+            "lvgl": [{"rotation": 90}],
+            "display": [{"rotation": 180}],
+        })
+        self.assertEqual(screen_mirror._detect_rotation(config), 90)
+
+    def test_detect_byte_order_lvgl_precedence_over_display(self):
+        config = {}
+        fv.full_config.set({
+            "lvgl": [{"byte_order": "big_endian"}],
+            "display": [{"byte_order": "little_endian"}],
+        })
+        self.assertEqual(screen_mirror._detect_byte_order(config), True)
+
+    def test_remote_html_rotation_injection(self):
+        html_path = REPO_ROOT / "components" / "screen_mirror" / "remote.html"
+        html_text = html_path.read_text(encoding="utf-8")
+        self.assertIn("/*%ROTATION%*/ 0", html_text, "Placeholder must exist in remote.html")
+
+        # Test injecting 90, 180, 270
+        for rot in [90, 180, 270]:
+            injected = html_text.replace("/*%ROTATION%*/ 0", str(rot))
+            self.assertIn(f"let rotation = {rot};", injected)
+
 
 if __name__ == "__main__":
     unittest.main()

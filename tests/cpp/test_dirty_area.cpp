@@ -96,3 +96,51 @@ TEST_CASE("Dirty Area: Escalation to full keyframe check") {
   CHECK(DirtyAreaTracker::should_escalate_to_keyframe(100, 100, 0, 480, 60) == true);
   CHECK(DirtyAreaTracker::should_escalate_to_keyframe(100, 100, 800, 0, 60) == true);
 }
+
+TEST_CASE("Dirty Area: Production extract_tile_rgb565 sub-rectangle extraction") {
+  // Create a 4x4 image with 16-bit RGB565 pixels (32 bytes total)
+  // Each pixel has value: (y * 4 + x) encoded in little endian
+  uint16_t frame[4][4];
+  for (int y = 0; y < 4; y++) {
+    for (int x = 0; x < 4; x++) {
+      frame[y][x] = static_cast<uint16_t>((y * 4 + x) * 100);
+    }
+  }
+  const uint8_t *raw_buf = reinterpret_cast<const uint8_t *>(frame);
+
+  // Extract a 2x2 sub-tile at x1=1, y1=1
+  // Expected pixels:
+  // Row 0: frame[1][1] (500), frame[1][2] (600)
+  // Row 1: frame[2][1] (900), frame[2][2] (1000)
+  uint16_t tile_out[2][2] = {{0, 0}, {0, 0}};
+  uint8_t *tile_scratch = reinterpret_cast<uint8_t *>(tile_out);
+  size_t scratch_size = sizeof(tile_out);
+
+  bool ok = DirtyAreaTracker::extract_tile_rgb565(raw_buf, 4, 4, 1, 1, 2, 2, tile_scratch, scratch_size);
+  CHECK(ok == true);
+  CHECK(tile_out[0][0] == 500);
+  CHECK(tile_out[0][1] == 600);
+  CHECK(tile_out[1][0] == 900);
+  CHECK(tile_out[1][1] == 1000);
+
+  SUBCASE("Error handling & boundary guards") {
+    // Insufficient scratch size
+    CHECK(DirtyAreaTracker::extract_tile_rgb565(raw_buf, 4, 4, 1, 1, 2, 2, tile_scratch, 7) == false);
+
+    // Out of bounds: x1 + w > hw_w
+    CHECK(DirtyAreaTracker::extract_tile_rgb565(raw_buf, 4, 4, 3, 1, 2, 2, tile_scratch, scratch_size) == false);
+
+    // Out of bounds: y1 + h > hw_h
+    CHECK(DirtyAreaTracker::extract_tile_rgb565(raw_buf, 4, 4, 1, 3, 2, 2, tile_scratch, scratch_size) == false);
+
+    // Negative coordinates
+    CHECK(DirtyAreaTracker::extract_tile_rgb565(raw_buf, 4, 4, -1, 1, 2, 2, tile_scratch, scratch_size) == false);
+
+    // Zero dimension
+    CHECK(DirtyAreaTracker::extract_tile_rgb565(raw_buf, 4, 4, 0, 0, 0, 2, tile_scratch, scratch_size) == false);
+
+    // Null pointers
+    CHECK(DirtyAreaTracker::extract_tile_rgb565(nullptr, 4, 4, 0, 0, 2, 2, tile_scratch, scratch_size) == false);
+    CHECK(DirtyAreaTracker::extract_tile_rgb565(raw_buf, 4, 4, 0, 0, 2, 2, nullptr, scratch_size) == false);
+  }
+}

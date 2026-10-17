@@ -97,3 +97,31 @@ TEST_CASE("RGB565: Production byte swap helper") {
   uint16_t be_blue = 0x1F00;
   CHECK(swap_rgb565(be_blue) == 0x001F);
 }
+
+TEST_CASE("RGB565: Production swap_rgb565_buffer batch buffer swap") {
+  // Stream of 3 RGB565 pixels in big-endian:
+  // Pixel 0: 0x12 0x34 -> should swap to 0x34 0x12
+  // Pixel 1: 0xAB 0xCD -> should swap to 0xCD 0xAB
+  // Pixel 2: 0x00 0xFF -> should swap to 0xFF 0x00
+  const uint8_t src[6] = {0x12, 0x34, 0xAB, 0xCD, 0x00, 0xFF};
+  uint8_t dst[6] = {0};
+
+  swap_rgb565_buffer(src, dst, 6);
+  CHECK(dst[0] == 0x34);
+  CHECK(dst[1] == 0x12);
+  CHECK(dst[2] == 0xCD);
+  CHECK(dst[3] == 0xAB);
+  CHECK(dst[4] == 0xFF);
+  CHECK(dst[5] == 0x00);
+
+  // Null safety guards
+  swap_rgb565_buffer(nullptr, dst, 6);
+  swap_rgb565_buffer(src, nullptr, 6);
+
+  // Odd length guard (swaps only complete 2-byte pairs)
+  uint8_t odd_dst[3] = {0, 0, 0x77};
+  swap_rgb565_buffer(src, odd_dst, 3);
+  CHECK(odd_dst[0] == 0x34);
+  CHECK(odd_dst[1] == 0x12);
+  CHECK(odd_dst[2] == 0x77); // Unchanged
+}

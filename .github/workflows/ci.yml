@@ -59,12 +59,13 @@ jobs:
         run: node tests/web/test_remote.mjs
 
   esphome-build:
-    name: ESPHome Firmware Build (${{ matrix.version }})
+    name: ESPHome Build (${{ matrix.fixture }}, ${{ matrix.version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         version: [latest, beta]
+        fixture: [test_minimal.yaml, test_full.yaml]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -72,5 +73,5 @@ jobs:
       - name: Build Test Firmware with Official ESPHome Action
         uses: esphome/build-action@v6
         with:
-          yaml-file: tests/fixtures/test_minimal.yaml
+          yaml-file: tests/fixtures/${{ matrix.fixture }}
           version: ${{ matrix.version }}

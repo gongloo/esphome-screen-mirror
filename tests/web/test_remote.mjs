@@ -18,12 +18,32 @@ const scriptCode = scriptMatch[1];
 function createRemoteContext(canvasRect = { left: 0, top: 0, width: 800, height: 480 }, initialW = 800, initialH = 480) {
   let wsSentMessages = [];
   let currentRect = { ...canvasRect };
+  let currentTime = 1000;
+  let timers = [];
+  let timerId = 0;
 
+  const canvasListeners = {};
   const mockCanvas = {
     width: initialW,
     height: initialH,
     style: {},
-    addEventListener: () => {},
+    addEventListener: (type, fn) => {
+      if (!canvasListeners[type]) canvasListeners[type] = [];
+      canvasListeners[type].push(fn);
+    },
+    dispatchEvent: (type, evt = {}) => {
+      const list = canvasListeners[type] || [];
+      const eventObj = {
+        preventDefault: () => {},
+        clientX: 0,
+        clientY: 0,
+        pointerId: 1,
+        ...evt,
+      };
+      for (const fn of list) fn(eventObj);
+    },
+    setPointerCapture: () => {},
+    releasePointerCapture: () => {},
     getBoundingClientRect: () => currentRect,
     getContext: () => ({
       imageSmoothingEnabled: true,
@@ -84,7 +104,9 @@ function createRemoteContext(canvasRect = { left: 0, top: 0, width: 800, height:
       devicePixelRatio: 1,
     },
     location: { protocol: 'http:', host: 'esphome.local' },
-    performance: { now: () => 1000 },
+    performance: {
+      now: () => currentTime,
+    },
     WebSocket: MockWebSocket,
     Image: class MockImage {},
     Blob: class MockBlob {
@@ -97,8 +119,14 @@ function createRemoteContext(canvasRect = { left: 0, top: 0, width: 800, height:
     ArrayBuffer,
     Uint8Array,
     Math,
-    setTimeout: () => {},
-    clearTimeout: () => {},
+    setTimeout: (fn, delay) => {
+      const id = ++timerId;
+      timers.push({ id, fn, delay });
+      return id;
+    },
+    clearTimeout: (id) => {
+      timers = timers.filter((t) => t.id !== id);
+    },
     console,
     URL: {
       createObjectURL: () => 'blob:mock',
@@ -115,14 +143,22 @@ globalThis.__getRotation = () => rotation;
 globalThis.__setRotation = (r) => { rotation = r; };
 globalThis.__setHw = (w, h) => { hwWidth = w; hwHeight = h; };
 globalThis.__getPendingQueue = () => pendingQueue;
+globalThis.__requestKeyframeRecovery = () => { if (typeof requestKeyframeRecovery === 'function') requestKeyframeRecovery(); };
 `;
   vm.runInContext(scriptCode + harnessHook, sandbox);
 
   return {
     sandbox,
     mockCanvas,
+    elements,
     getSentWsMessages: () => wsSentMessages,
     setCanvasRect: (rect) => { currentRect = { ...rect }; },
+    advanceTime: (ms) => { currentTime += ms; },
+    fireTimers: () => {
+      const current = [...timers];
+      timers = [];
+      for (const t of current) t.fn();
+    },
   };
 }
 
@@ -258,4 +294,95 @@ test('Production remote.html: WebSocket message parsing and bounded queue backpr
   const rotPkt = createPacket(0x46, 1, true, 0, 0, 800, 480); // rot_code = 1 -> 90 deg
   ws.onmessage({ data: rotPkt });
   assert.equal(sandbox.__getRotation(), 90, 'Packet rotation must update remote.html rotation');
+});
+
+test('Production remote.html: pointer gesture state machine (quick tap vs hold-drag vs move throttling)', () => {
+  const { sandbox, mockCanvas, getSentWsMessages, advanceTime, fireTimers } = createRemoteContext();
+  sandbox.initWebSocket();
+  const ws = sandbox.__getWs();
+  ws.onopen();
+
+  // Clear initial 'K' message
+  const sent = getSentWsMessages();
+  sent.length = 0;
+
+  // Scenario 1: Quick Tap (< 350ms, no move > 6px) -> sends 'tap' ('T x y')
+  mockCanvas.dispatchEvent('pointerdown', { clientX: 100, clientY: 150 });
+  advanceTime(50);
+  mockCanvas.dispatchEvent('pointerup', { clientX: 100, clientY: 150 });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0], 'T 100 150', 'Quick tap should send T x y');
+  sent.length = 0;
+
+  // Scenario 2: Touch-and-hold (> 250ms holdTimer fires) -> sends 'down' ('D x y')
+  mockCanvas.dispatchEvent('pointerdown', { clientX: 200, clientY: 250 });
+  advanceTime(260);
+  fireTimers(); // holdTimer fires
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0], 'D 200 250', 'Hold timer should trigger D x y');
+
+  // Releasing after hold -> sends 'up' ('U x y')
+  advanceTime(100);
+  mockCanvas.dispatchEvent('pointerup', { clientX: 200, clientY: 250 });
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1], 'U 200 250', 'Releasing hold should trigger U x y');
+  sent.length = 0;
+
+  // Scenario 3: Drag gesture with movement threshold (> 6px) and 20ms throttling
+  mockCanvas.dispatchEvent('pointerdown', { clientX: 300, clientY: 300 });
+
+  // Move 3px (below 6px threshold) -> should not trigger down or move
+  advanceTime(10);
+  mockCanvas.dispatchEvent('pointermove', { clientX: 303, clientY: 300 });
+  assert.equal(sent.length, 0);
+
+  // Move 15px (crosses 6px threshold) -> triggers down and throttled move
+  advanceTime(25);
+  mockCanvas.dispatchEvent('pointermove', { clientX: 315, clientY: 300 });
+  assert.equal(sent[0], 'D 300 300', 'Crossing move threshold should send D at start coord');
+  assert.equal(sent[1], 'M 315 300', 'First move event sent');
+
+  // Rapid move within 10ms (< 20ms throttling) -> throttled
+  advanceTime(10);
+  mockCanvas.dispatchEvent('pointermove', { clientX: 320, clientY: 300 });
+  assert.equal(sent.length, 2, 'Rapid move within 10ms must be throttled');
+
+  // Move after 25ms (>= 20ms throttling) -> sends move
+  advanceTime(25);
+  mockCanvas.dispatchEvent('pointermove', { clientX: 325, clientY: 300 });
+  assert.equal(sent.length, 3);
+  assert.equal(sent[2], 'M 325 300');
+
+  // Release drag -> sends up
+  advanceTime(10);
+  mockCanvas.dispatchEvent('pointerup', { clientX: 325, clientY: 300 });
+  assert.equal(sent.length, 4);
+  assert.equal(sent[3], 'U 325 300', 'Finishing drag sends U x y');
+});
+
+test('Production remote.html: WebSocket disconnect and auto-recovery lifecycle', () => {
+  const { sandbox, elements, getSentWsMessages, advanceTime } = createRemoteContext();
+  sandbox.initWebSocket();
+  const ws = sandbox.__getWs();
+  ws.onopen();
+
+  const sent = getSentWsMessages();
+  assert.equal(sent[0], 'K', 'Keyframe requested on connection');
+
+  // Simulate WebSocket close event
+  ws.onclose();
+  assert.equal(elements.stat.textContent, 'HTTP Fallback', 'Status should update to HTTP Fallback on close');
+  assert.equal(elements.mode.textContent, 'Live Mirror', 'Mode should revert to Live Mirror');
+  assert.equal(sandbox.__getPendingQueue().length, 0, 'Pending queue must be cleared on disconnect');
+
+  // Re-open and verify keyframe auto-recovery
+  sandbox.initWebSocket();
+  const newWs = sandbox.__getWs();
+  newWs.onopen();
+  sent.length = 0;
+
+  // Trigger error recovery
+  advanceTime(1500); // Exceed 1000ms debounce
+  sandbox.__requestKeyframeRecovery();
+  assert.equal(sent[0], 'K', 'Corrupt frame or error should request full keyframe K');
 });
