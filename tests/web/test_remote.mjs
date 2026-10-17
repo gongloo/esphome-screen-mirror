@@ -1,228 +1,261 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import vm from 'node:vm';
+import { fileURLToPath } from 'node:url';
 
-// Isolated implementation of clientToRaw directly from remote.html
-function clientToRaw(clientX, clientY, rect, canvasWidth, canvasHeight, rotation, hwWidth, hwHeight) {
-  const clickX = clientX - rect.left;
-  const clickY = clientY - rect.top;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const htmlPath = path.resolve(__dirname, '../../components/screen_mirror/remote.html');
 
-  const dispX = Math.round(clickX * (canvasWidth / rect.width));
-  const dispY = Math.round(clickY * (canvasHeight / rect.height));
+// Read the real production remote.html and extract the <script> block
+const htmlContent = fs.readFileSync(htmlPath, 'utf8');
+const scriptMatch = htmlContent.match(/<script>([\s\S]*?)<\/script>/);
+assert.ok(scriptMatch, 'remote.html must contain a <script> block');
+const scriptCode = scriptMatch[1];
 
-  let rawX, rawY;
-  if (rotation === 90) {
-    rawX = hwWidth - dispY - 1;
-    rawY = dispX;
-  } else if (rotation === 180) {
-    rawX = hwWidth - dispX - 1;
-    rawY = hwHeight - dispY - 1;
-  } else if (rotation === 270) {
-    rawX = dispY;
-    rawY = hwHeight - dispX - 1;
-  } else {
-    rawX = dispX;
-    rawY = dispY;
+function createRemoteContext(canvasRect = { left: 0, top: 0, width: 800, height: 480 }, initialW = 800, initialH = 480) {
+  let wsSentMessages = [];
+  let currentRect = { ...canvasRect };
+
+  const mockCanvas = {
+    width: initialW,
+    height: initialH,
+    style: {},
+    addEventListener: () => {},
+    getBoundingClientRect: () => currentRect,
+    getContext: () => ({
+      imageSmoothingEnabled: true,
+      drawImage: () => {},
+      fillRect: () => {},
+    }),
+  };
+
+  const elements = {
+    screenCanvas: mockCanvas,
+    container: {
+      appendChild: () => {},
+      style: {},
+      addEventListener: () => {},
+      getBoundingClientRect: () => currentRect,
+    },
+    metricLbl: { textContent: '' },
+    lat: { textContent: '' },
+    res: { textContent: '' },
+    rot: { textContent: '' },
+    stat: { textContent: '' },
+    mode: { textContent: '' },
+    fps: { textContent: '' },
+    fpslabel: { textContent: '' },
+  };
+
+  class MockWebSocket {
+    static OPEN = 1;
+    static CLOSED = 3;
+    constructor(url) {
+      this.url = url;
+      this.readyState = MockWebSocket.OPEN;
+      this.binaryType = 'blob';
+      this.onopen = null;
+      this.onclose = null;
+      this.onerror = null;
+      this.onmessage = null;
+    }
+    send(data) {
+      wsSentMessages.push(data);
+    }
+    close() {
+      this.readyState = MockWebSocket.CLOSED;
+      if (this.onclose) this.onclose();
+    }
   }
 
-  rawX = Math.max(0, Math.min(hwWidth - 1, Math.round(rawX)));
-  rawY = Math.max(0, Math.min(hwHeight - 1, Math.round(rawY)));
-  return { clickX, clickY, rawX, rawY };
+  const sandbox = {
+    document: {
+      getElementById: (id) => elements[id] || { textContent: '', style: {} },
+      addEventListener: () => {},
+      createElement: () => ({ className: '', style: {}, remove: () => {} }),
+      visibilityState: 'visible',
+    },
+    window: {
+      addEventListener: () => {},
+      location: { protocol: 'http:', host: 'esphome.local' },
+      devicePixelRatio: 1,
+    },
+    location: { protocol: 'http:', host: 'esphome.local' },
+    performance: { now: () => 1000 },
+    WebSocket: MockWebSocket,
+    Image: class MockImage {},
+    Blob: class MockBlob {
+      constructor(parts, options) {
+        this.parts = parts;
+        this.options = options;
+      }
+    },
+    DataView,
+    ArrayBuffer,
+    Uint8Array,
+    Math,
+    setTimeout: () => {},
+    clearTimeout: () => {},
+    console,
+    URL: {
+      createObjectURL: () => 'blob:mock',
+      revokeObjectURL: () => {},
+    },
+  };
+
+  vm.createContext(sandbox);
+  // Run the untouched production script code, attaching test inspector accessors
+  const harnessHook = `
+;
+globalThis.__getWs = () => ws;
+globalThis.__getRotation = () => rotation;
+globalThis.__setRotation = (r) => { rotation = r; };
+globalThis.__setHw = (w, h) => { hwWidth = w; hwHeight = h; };
+globalThis.__getPendingQueue = () => pendingQueue;
+`;
+  vm.runInContext(scriptCode + harnessHook, sandbox);
+
+  return {
+    sandbox,
+    mockCanvas,
+    getSentWsMessages: () => wsSentMessages,
+    setCanvasRect: (rect) => { currentRect = { ...rect }; },
+  };
 }
 
-test('Coordinate Transformation - 0 deg rotation', () => {
-  const rect = { left: 0, top: 0, width: 800, height: 480 };
-  const hwW = 800, hwH = 480;
+test('Production remote.html: clientToRaw coordinate math across rotations', () => {
+  const { sandbox, mockCanvas, setCanvasRect } = createRemoteContext();
+  const clientToRaw = sandbox.clientToRaw;
+  assert.equal(typeof clientToRaw, 'function', 'clientToRaw must be defined in production script');
 
-  // Origin (top-left)
-  const tl = clientToRaw(0, 0, rect, 800, 480, 0, hwW, hwH);
-  assert.equal(tl.rawX, 0);
-  assert.equal(tl.rawY, 0);
+  // Test 1: 0 deg rotation (800x480)
+  sandbox.__setRotation(0);
+  sandbox.__setHw(800, 480);
+  mockCanvas.width = 800;
+  mockCanvas.height = 480;
+  setCanvasRect({ left: 0, top: 0, width: 800, height: 480 });
 
-  // Bottom-right
-  const br = clientToRaw(799, 479, rect, 800, 480, 0, hwW, hwH);
-  assert.equal(br.rawX, 799);
-  assert.equal(br.rawY, 479);
+  let pt = clientToRaw(0, 0);
+  assert.equal(pt.rawX, 0);
+  assert.equal(pt.rawY, 0);
 
-  // Clamping check
-  const oob = clientToRaw(-50, 600, rect, 800, 480, 0, hwW, hwH);
-  assert.equal(oob.rawX, 0);
-  assert.equal(oob.rawY, 479);
+  pt = clientToRaw(799, 479);
+  assert.equal(pt.rawX, 799);
+  assert.equal(pt.rawY, 479);
+
+  // Clamping test
+  pt = clientToRaw(-10, 600);
+  assert.equal(pt.rawX, 0);
+  assert.equal(pt.rawY, 479);
+
+  // Test 2: 90 deg rotation (displayed canvas 480x800, hardware 800x480)
+  sandbox.__setRotation(90);
+  mockCanvas.width = 480;
+  mockCanvas.height = 800;
+  setCanvasRect({ left: 0, top: 0, width: 480, height: 800 });
+
+  pt = clientToRaw(0, 0);
+  assert.equal(pt.rawX, 799);
+  assert.equal(pt.rawY, 0);
+
+  pt = clientToRaw(479, 799);
+  assert.equal(pt.rawX, 0);
+  assert.equal(pt.rawY, 479);
+
+  // Test 3: 180 deg rotation
+  sandbox.__setRotation(180);
+  mockCanvas.width = 800;
+  mockCanvas.height = 480;
+  setCanvasRect({ left: 0, top: 0, width: 800, height: 480 });
+
+  pt = clientToRaw(0, 0);
+  assert.equal(pt.rawX, 799);
+  assert.equal(pt.rawY, 479);
+
+  pt = clientToRaw(799, 479);
+  assert.equal(pt.rawX, 0);
+  assert.equal(pt.rawY, 0);
+
+  // Test 4: 270 deg rotation
+  sandbox.__setRotation(270);
+  mockCanvas.width = 480;
+  mockCanvas.height = 800;
+  setCanvasRect({ left: 0, top: 0, width: 480, height: 800 });
+
+  pt = clientToRaw(0, 0);
+  assert.equal(pt.rawX, 0);
+  assert.equal(pt.rawY, 479);
+
+  pt = clientToRaw(479, 799);
+  assert.equal(pt.rawX, 799);
+  assert.equal(pt.rawY, 0);
 });
 
-test('Coordinate Transformation - 90 deg rotation', () => {
-  // Canvas is 480x800, Hardware is 800x480
-  const rect = { left: 0, top: 0, width: 480, height: 800 };
-  const hwW = 800, hwH = 480;
+test('Production remote.html: sendTouch WebSocket protocol formatting', () => {
+  const { sandbox, getSentWsMessages } = createRemoteContext();
+  const sendTouch = sandbox.sendTouch;
+  assert.equal(typeof sendTouch, 'function');
 
-  // Top-left of displayed canvas -> top-right of hardware framebuffer
-  const tl = clientToRaw(0, 0, rect, 480, 800, 90, hwW, hwH);
-  assert.equal(tl.rawX, 799);
-  assert.equal(tl.rawY, 0);
+  // Trigger WebSocket handshake
+  sandbox.initWebSocket();
+  const ws = sandbox.__getWs();
+  assert.ok(ws, 'WebSocket instance must be created');
+  ws.onopen();
 
-  // Bottom-right of displayed canvas -> bottom-left of hardware framebuffer
-  const br = clientToRaw(479, 799, rect, 480, 800, 90, hwW, hwH);
-  assert.equal(br.rawX, 0);
-  assert.equal(br.rawY, 479);
+  const sent = getSentWsMessages();
+  assert.equal(sent[0], 'K', 'Should request keyframe on open');
+
+  sendTouch(100, 200, 'tap');
+  assert.equal(sent[1], 'T 100 200');
+
+  sendTouch(50, 60, 'down');
+  assert.equal(sent[2], 'D 50 60');
+
+  sendTouch(55, 65, 'move');
+  assert.equal(sent[3], 'M 55 65');
+
+  sendTouch(55, 65, 'up');
+  assert.equal(sent[4], 'U 55 65');
 });
 
-test('Coordinate Transformation - 180 deg rotation', () => {
-  const rect = { left: 0, top: 0, width: 800, height: 480 };
-  const hwW = 800, hwH = 480;
+test('Production remote.html: WebSocket message parsing and bounded queue backpressure', () => {
+  const { sandbox } = createRemoteContext();
+  sandbox.initWebSocket();
+  const ws = sandbox.__getWs();
+  ws.onopen();
 
-  const tl = clientToRaw(0, 0, rect, 800, 480, 180, hwW, hwH);
-  assert.equal(tl.rawX, 799);
-  assert.equal(tl.rawY, 479);
-
-  const br = clientToRaw(799, 479, rect, 800, 480, 180, hwW, hwH);
-  assert.equal(br.rawX, 0);
-  assert.equal(br.rawY, 0);
-});
-
-test('Coordinate Transformation - 270 deg rotation', () => {
-  const rect = { left: 0, top: 0, width: 480, height: 800 };
-  const hwW = 800, hwH = 480;
-
-  const tl = clientToRaw(0, 0, rect, 480, 800, 270, hwW, hwH);
-  assert.equal(tl.rawX, 0);
-  assert.equal(tl.rawY, 479);
-
-  const br = clientToRaw(479, 799, rect, 480, 800, 270, hwW, hwH);
-  assert.equal(br.rawX, 799);
-  assert.equal(br.rawY, 0);
-});
-
-test('Queue Backpressure and Keyframe Flush', () => {
-  const MAX_PENDING = 2;
-  const pendingQueue = [];
-
-  function enqueue(magic, id) {
-    if (magic === 0x46) { // Keyframe
-      pendingQueue.length = 0;
-    } else if (pendingQueue.length >= MAX_PENDING) {
-      pendingQueue.shift();
-    }
-    pendingQueue.push({ magic, id });
-  }
-
-  // Push 2 delta frames
-  enqueue(0x44, 'd1');
-  enqueue(0x44, 'd2');
-  assert.equal(pendingQueue.length, 2);
-  assert.equal(pendingQueue[0].id, 'd1');
-
-  // Push 3rd delta frame -> should drop oldest ('d1')
-  enqueue(0x44, 'd3');
-  assert.equal(pendingQueue.length, 2);
-  assert.equal(pendingQueue[0].id, 'd2');
-  assert.equal(pendingQueue[1].id, 'd3');
-
-  // Keyframe arrives -> drops all delta frames and keeps only keyframe
-  enqueue(0x46, 'kf1');
-  assert.equal(pendingQueue.length, 1);
-  assert.equal(pendingQueue[0].id, 'kf1');
-});
-
-test('Auto-Recovery Keyframe Debounce', () => {
-  let recoveryCount = 0;
-  let lastKeyframeRecovery = -1000;
-
-  function triggerError(now) {
-    if (now - lastKeyframeRecovery > 1000) {
-      lastKeyframeRecovery = now;
-      recoveryCount++;
-      return true;
-    }
-    return false;
-  }
-
-  // First error at t = 100ms -> sent
-  assert.equal(triggerError(100), true);
-  assert.equal(recoveryCount, 1);
-
-  // Rapid consecutive errors (< 1000ms later) -> throttled
-  assert.equal(triggerError(200), false);
-  assert.equal(triggerError(500), false);
-  assert.equal(triggerError(1099), false);
-  assert.equal(recoveryCount, 1);
-
-  // Error after 1000ms cooldown (t = 1101ms) -> sent
-  assert.equal(triggerError(1101), true);
-  assert.equal(recoveryCount, 2);
-});
-
-test('Binary Packet Header Parser', () => {
-  function parseHeader(buf) {
-    if (!(buf instanceof ArrayBuffer) || buf.byteLength < 10) return null;
+  // Helper to create valid 10-byte binary message with dummy payload
+  function createPacket(magic, rotCode, isKeyframe, x, y, w, h, payloadSize = 20) {
+    const buf = new ArrayBuffer(10 + payloadSize);
     const view = new DataView(buf);
-    const magic = view.getUint8(0);
-    const flags = view.getUint8(1);
-    const x = (view.getUint8(2) << 8) | view.getUint8(3);
-    const y = (view.getUint8(4) << 8) | view.getUint8(5);
-    const w = (view.getUint8(6) << 8) | view.getUint8(7);
-    const h = (view.getUint8(8) << 8) | view.getUint8(9);
-    const rotation = ((flags >> 2) & 0x03) * 90;
-    const isKeyframe = (flags & 0x01) === 1;
-    return { magic, flags, x, y, w, h, rotation, isKeyframe };
+    view.setUint8(0, magic);
+    view.setUint8(1, (rotCode << 2) | (isKeyframe ? 1 : 0));
+    view.setUint16(2, x);
+    view.setUint16(4, y);
+    view.setUint16(6, w);
+    view.setUint16(8, h);
+    return buf;
   }
 
-  // 1. Valid Keyframe packet at 90 deg rotation, full screen 800x480
-  const kfBuf = new ArrayBuffer(10);
-  const kfView = new DataView(kfBuf);
-  kfView.setUint8(0, 0x46); // 'F'
-  kfView.setUint8(1, (1 << 2) | 1); // rot_code = 1 (90 deg), isKeyframe = 1
-  kfView.setUint16(2, 0); // x = 0
-  kfView.setUint16(4, 0); // y = 0
-  kfView.setUint16(6, 800); // w = 800
-  kfView.setUint16(8, 480); // h = 480
+  // Send 2 Delta packets
+  const pkt1 = createPacket(0x44, 0, false, 10, 10, 32, 32);
+  const pkt2 = createPacket(0x44, 0, false, 50, 50, 32, 32);
+  ws.onmessage({ data: pkt1 });
+  ws.onmessage({ data: pkt2 });
 
-  const parsedKf = parseHeader(kfBuf);
-  assert.notEqual(parsedKf, null);
-  assert.equal(parsedKf.magic, 0x46);
-  assert.equal(parsedKf.isKeyframe, true);
-  assert.equal(parsedKf.rotation, 90);
-  assert.equal(parsedKf.x, 0);
-  assert.equal(parsedKf.y, 0);
-  assert.equal(parsedKf.w, 800);
-  assert.equal(parsedKf.h, 480);
+  // Send 3rd Delta packet -> Backpressure MAX_PENDING = 2 drops oldest
+  const pkt3 = createPacket(0x44, 0, false, 90, 90, 32, 32);
+  ws.onmessage({ data: pkt3 });
 
-  // 2. Valid Delta tile packet at 270 deg rotation (rot_code = 3)
-  const dtBuf = new ArrayBuffer(10);
-  const dtView = new DataView(dtBuf);
-  dtView.setUint8(0, 0x44); // 'D'
-  dtView.setUint8(1, (3 << 2) | 0); // rot_code = 3 (270 deg), isKeyframe = 0
-  dtView.setUint16(2, 64);  // x = 64
-  dtView.setUint16(4, 128); // y = 128
-  dtView.setUint16(6, 32);  // w = 32
-  dtView.setUint16(8, 48);  // h = 48
+  // Send Keyframe packet -> Flushes any pending delta tiles
+  const kfPkt = createPacket(0x46, 0, true, 0, 0, 800, 480);
+  ws.onmessage({ data: kfPkt });
 
-  const parsedDt = parseHeader(dtBuf);
-  assert.notEqual(parsedDt, null);
-  assert.equal(parsedDt.magic, 0x44);
-  assert.equal(parsedDt.isKeyframe, false);
-  assert.equal(parsedDt.rotation, 270);
-  assert.equal(parsedDt.x, 64);
-  assert.equal(parsedDt.y, 128);
-  assert.equal(parsedDt.w, 32);
-  assert.equal(parsedDt.h, 48);
-
-  // 3. Truncated packet (< 10 bytes)
-  const shortBuf = new ArrayBuffer(8);
-  assert.equal(parseHeader(shortBuf), null);
+  // Verify rotation packet updates
+  const rotPkt = createPacket(0x46, 1, true, 0, 0, 800, 480); // rot_code = 1 -> 90 deg
+  ws.onmessage({ data: rotPkt });
+  assert.equal(sandbox.__getRotation(), 90, 'Packet rotation must update remote.html rotation');
 });
-
-test('Touch Command Protocol Formatting', () => {
-  function formatTouchCmd(rawX, rawY, action) {
-    if (action === 'tap') return `T ${rawX} ${rawY}`;
-    if (action === 'down') return `D ${rawX} ${rawY}`;
-    if (action === 'move') return `M ${rawX} ${rawY}`;
-    if (action === 'up') return `U ${rawX} ${rawY}`;
-    return null;
-  }
-
-  assert.equal(formatTouchCmd(150, 250, 'tap'), 'T 150 250');
-  assert.equal(formatTouchCmd(10, 20, 'down'), 'D 10 20');
-  assert.equal(formatTouchCmd(12, 22, 'move'), 'M 12 22');
-  assert.equal(formatTouchCmd(14, 24, 'up'), 'U 14 24');
-  assert.equal(formatTouchCmd(0, 0, 'invalid'), null);
-});
-

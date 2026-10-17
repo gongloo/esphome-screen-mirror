@@ -1,44 +1,11 @@
 #include <doctest/doctest.h>
+#include "screen_mirror/bmp_builder.h"
 #include <cstdint>
 #include <vector>
-#include <cstring>
+
+using namespace esphome::screen_mirror;
 
 namespace {
-
-std::vector<uint8_t> generate_bmp_header(int32_t w, int32_t h) {
-  uint32_t file_size = 66 + (uint32_t)w * h * 2;
-  int32_t neg_h = -h;
-  uint32_t img_size = (uint32_t)w * h * 2;
-  uint8_t header[66] = {
-      'B', 'M',
-      static_cast<uint8_t>(file_size), static_cast<uint8_t>(file_size >> 8),
-      static_cast<uint8_t>(file_size >> 16), static_cast<uint8_t>(file_size >> 24),
-      0, 0, 0, 0,
-      66, 0, 0, 0,
-      40, 0, 0, 0,
-      static_cast<uint8_t>(w), static_cast<uint8_t>(w >> 8),
-      static_cast<uint8_t>(w >> 16), static_cast<uint8_t>(w >> 24),
-      static_cast<uint8_t>(neg_h), static_cast<uint8_t>(neg_h >> 8),
-      static_cast<uint8_t>(neg_h >> 16), static_cast<uint8_t>(neg_h >> 24),
-      1, 0,
-      16, 0,
-      3, 0, 0, 0,  // BI_BITFIELDS
-      static_cast<uint8_t>(img_size), static_cast<uint8_t>(img_size >> 8),
-      static_cast<uint8_t>(img_size >> 16), static_cast<uint8_t>(img_size >> 24),
-      0x13, 0x0B, 0, 0,  // 2835 ppm (~72 DPI)
-      0x13, 0x0B, 0, 0,
-      0, 0, 0, 0,
-      0, 0, 0, 0,
-      0x00, 0xF8, 0x00, 0x00,  // Red mask:   0x0000F800
-      0xE0, 0x07, 0x00, 0x00,  // Green mask: 0x000007E0
-      0x1F, 0x00, 0x00, 0x00   // Blue mask:  0x0000001F
-  };
-  return std::vector<uint8_t>(header, header + 66);
-}
-
-inline uint16_t swap_rgb565(uint16_t v) {
-  return static_cast<uint16_t>((v >> 8) | (v << 8));
-}
 
 uint32_t read_u32_le(const uint8_t *p) {
   return static_cast<uint32_t>(p[0]) |
@@ -57,12 +24,13 @@ uint16_t read_u16_le(const uint8_t *p) {
 
 }  // namespace
 
-TEST_CASE("BMP Header: 66-byte BI_BITFIELDS structure validation") {
+TEST_CASE("BMP Header: Real production build_bmp_header 66-byte BI_BITFIELDS") {
   const int32_t width = 800;
   const int32_t height = 480;
-  auto hdr = generate_bmp_header(width, height);
+  uint8_t hdr[66];
 
-  REQUIRE(hdr.size() == 66);
+  // Call the actual production build_bmp_header function from bmp_builder.h
+  REQUIRE(build_bmp_header(width, height, hdr) == true);
 
   SUBCASE("BITMAPFILEHEADER (Bytes 0-13)") {
     CHECK(hdr[0] == 'B');
@@ -94,27 +62,30 @@ TEST_CASE("BMP Header: 66-byte BI_BITFIELDS structure validation") {
   }
 }
 
-TEST_CASE("BMP Header: Arbitrary resolutions") {
+TEST_CASE("BMP Header: Arbitrary resolutions via real production code") {
   SUBCASE("Square 320x320") {
-    auto hdr = generate_bmp_header(320, 320);
-    CHECK(hdr.size() == 66);
+    uint8_t hdr[66];
+    REQUIRE(build_bmp_header(320, 320, hdr) == true);
     CHECK(read_u32_le(&hdr[2]) == 66 + 320 * 320 * 2);
     CHECK(read_s32_le(&hdr[18]) == 320);
     CHECK(read_s32_le(&hdr[22]) == -320);
   }
 
   SUBCASE("High resolution 1024x600") {
-    auto hdr = generate_bmp_header(1024, 600);
-    CHECK(hdr.size() == 66);
+    uint8_t hdr[66];
+    REQUIRE(build_bmp_header(1024, 600, hdr) == true);
     CHECK(read_u32_le(&hdr[2]) == 66 + 1024 * 600 * 2);
     CHECK(read_s32_le(&hdr[18]) == 1024);
     CHECK(read_s32_le(&hdr[22]) == -600);
   }
+
+  SUBCASE("Null buffer guard") {
+    CHECK(build_bmp_header(800, 480, nullptr) == false);
+  }
 }
 
-TEST_CASE("RGB565: Big-endian byte swap helper") {
+TEST_CASE("RGB565: Production byte swap helper") {
   // Pure Red in RGB565 little-endian: 0xF800
-  // When stored in big-endian hardware memory: 0x00 0xF8 -> uint16_t is 0x00F8.
   uint16_t be_red = 0x00F8;
   CHECK(swap_rgb565(be_red) == 0xF800);
 

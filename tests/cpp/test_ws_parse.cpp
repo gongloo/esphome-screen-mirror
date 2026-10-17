@@ -1,83 +1,9 @@
 #include <doctest/doctest.h>
-#include <cstdint>
-#include <cstdio>
-#include <string>
-#include <tuple>
+#include "screen_mirror/protocol.h"
 
-namespace {
+using namespace esphome::screen_mirror;
 
-enum class WsCmdType {
-  NONE,
-  KEYFRAME,
-  TAP,
-  DOWN,
-  MOVE,
-  UP
-};
-
-struct ParsedWsCmd {
-  WsCmdType type{WsCmdType::NONE};
-  int x{0};
-  int y{0};
-  uint16_t duration{80};
-};
-
-// Extracted WebSocket text packet parser directly mirroring screen_mirror.cpp ws_handler
-ParsedWsCmd parse_ws_packet(const char *buf, size_t len) {
-  ParsedWsCmd cmd{};
-  if (buf == nullptr || len == 0) {
-    return cmd;
-  }
-
-  char action_char = buf[0];
-  int x = 0, y = 0;
-
-  if (action_char == 'K' || action_char == 'k') {
-    cmd.type = WsCmdType::KEYFRAME;
-    return cmd;
-  }
-  if (action_char == 'T' || action_char == 't') {
-    if (std::sscanf(buf + 1, "%d %d", &x, &y) == 2) {
-      cmd.type = WsCmdType::TAP;
-      cmd.x = x;
-      cmd.y = y;
-      cmd.duration = 80;
-      return cmd;
-    }
-  } else if (action_char == 'D' || action_char == 'd') {
-    if (std::sscanf(buf + 1, "%d %d", &x, &y) == 2) {
-      cmd.type = WsCmdType::DOWN;
-      cmd.x = x;
-      cmd.y = y;
-      return cmd;
-    }
-  } else if (action_char == 'M' || action_char == 'm') {
-    if (std::sscanf(buf + 1, "%d %d", &x, &y) == 2) {
-      cmd.type = WsCmdType::MOVE;
-      cmd.x = x;
-      cmd.y = y;
-      return cmd;
-    }
-  } else if (action_char == 'U' || action_char == 'u') {
-    if (std::sscanf(buf + 1, "%d %d", &x, &y) == 2) {
-      cmd.type = WsCmdType::UP;
-      cmd.x = x;
-      cmd.y = y;
-      return cmd;
-    } else {
-      cmd.type = WsCmdType::UP;
-      cmd.x = 0;
-      cmd.y = 0;
-      return cmd;
-    }
-  }
-
-  return cmd;
-}
-
-}  // namespace
-
-TEST_CASE("WebSocket Text Command Parser: Keyframe Requests") {
+TEST_CASE("WebSocket Text Command Parser: Production parse_ws_packet Keyframe Requests") {
   SUBCASE("Uppercase K") {
     auto cmd = parse_ws_packet("K", 1);
     CHECK(cmd.type == WsCmdType::KEYFRAME);
@@ -89,7 +15,7 @@ TEST_CASE("WebSocket Text Command Parser: Keyframe Requests") {
   }
 }
 
-TEST_CASE("WebSocket Text Command Parser: Touch Commands") {
+TEST_CASE("WebSocket Text Command Parser: Production parse_ws_packet Touch Commands") {
   SUBCASE("Tap command") {
     auto cmd = parse_ws_packet("T 320 240", 9);
     CHECK(cmd.type == WsCmdType::TAP);

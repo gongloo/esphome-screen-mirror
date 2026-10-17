@@ -1,5 +1,5 @@
 CXX ?= c++
-CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror -g -fsanitize=address,undefined
+CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror -g -fsanitize=address,undefined -I../../components
 
 # Include Homebrew path on macOS if present
 BREW_PREFIX := $(shell brew --prefix 2>/dev/null)

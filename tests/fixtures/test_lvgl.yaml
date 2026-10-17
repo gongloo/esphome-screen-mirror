@@ -1,0 +1,38 @@
+esphome:
+  name: test-lvgl
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "MockSSID"
+  password: "MockPassword"
+
+spi:
+  clk_pin: 12
+  mosi_pin: 11
+
+display:
+  - platform: ili9xxx
+    model: ili9341
+    cs_pin: 10
+    dc_pin: 9
+    invert_colors: false
+    dimensions:
+      width: 320
+      height: 240
+    id: test_disp
+
+lvgl:
+  displays:
+    - test_disp
+
+external_components:
+  - source:
+      type: local
+      path: ../../components
+
+screen_mirror:
+  display: test_disp
