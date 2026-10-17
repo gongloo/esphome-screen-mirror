@@ -124,6 +124,22 @@ class TestScreenMirrorCodegen(unittest.TestCase):
             injected = html_text.replace("/*%ROTATION%*/ 0", str(rot))
             self.assertIn(f"let rotation = {rot};", injected)
 
+    def test_to_code_requests_ota_state_listeners(self):
+        import asyncio
+        import tempfile
+        from unittest.mock import patch, AsyncMock, MagicMock
+        from esphome.components.ota import OTA_STATE_LISTENER_KEY
+        import esphome.codegen as cg
+        CORE.build_path = tempfile.mkdtemp()
+        CORE.data[OTA_STATE_LISTENER_KEY] = False
+        config = screen_mirror.CONFIG_SCHEMA({"display": "main_display"})
+        with patch("esphome.codegen.register_component", new_callable=AsyncMock), \
+             patch("esphome.codegen.get_variable", new_callable=AsyncMock, return_value=cg.MockObj("disp_ptr")), \
+             patch("esphome.components.esp32.add_idf_component", new_callable=MagicMock), \
+             patch("esphome.components.esp32.add_idf_sdkconfig_option", new_callable=MagicMock):
+            asyncio.run(screen_mirror.to_code(config))
+        self.assertTrue(CORE.data.get(OTA_STATE_LISTENER_KEY, False))
+
 
 if __name__ == "__main__":
     unittest.main()

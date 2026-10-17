@@ -151,6 +151,10 @@ void ScreenMirrorComponent::setup() {
   // Install LVGL dirty region invalidation and render-ready hooks
   this->setup_lvgl_hooks();
 
+#ifdef USE_OTA_STATE_LISTENER
+  ota::get_global_ota_callback()->add_global_state_listener(this);
+#endif
+
   if (web_server_base::global_web_server_base == nullptr) {
     ESP_LOGW(TAG, "No web_server_base registered; remote endpoints will be unavailable.");
     return;
@@ -170,6 +174,11 @@ void ScreenMirrorComponent::setup() {
       return (url == "/screenshot.jpg" || url == "/screenshot.jpeg");
     }
     void handleRequest(AsyncWebServerRequest *request) override {
+      if (this->parent_->is_ota_in_progress()) {
+        request->send(503, "text/plain", "OTA update in progress");
+        return;
+      }
+
       const uint8_t *raw_buf = nullptr;
       int width = 0, height = 0;
       if (!this->parent_->capture_frame_rgb565(raw_buf, width, height) || raw_buf == nullptr) {
@@ -228,6 +237,11 @@ void ScreenMirrorComponent::setup() {
       return request->url_to(url_buf) == "/screenshot.bmp";
     }
     void handleRequest(AsyncWebServerRequest *request) override {
+      if (this->parent_->is_ota_in_progress()) {
+        request->send(503, "text/plain", "OTA update in progress");
+        return;
+      }
+
       const uint8_t *buffer = nullptr;
       int width = 0, height = 0;
       if (!this->parent_->capture_frame_rgb565(buffer, width, height) || buffer == nullptr) {
@@ -279,6 +293,11 @@ void ScreenMirrorComponent::setup() {
       return request->url_to(url_buf) == "/mirror/info";
     }
     void handleRequest(AsyncWebServerRequest *request) override {
+      if (this->parent_->is_ota_in_progress()) {
+        request->send(503, "application/json", "{\"error\":\"OTA update in progress\"}");
+        return;
+      }
+
       char json[256];
       int w = (this->parent_->display_ != nullptr) ? this->parent_->display_->get_native_width() : 0;
       int h = (this->parent_->display_ != nullptr) ? this->parent_->display_->get_native_height() : 0;
@@ -305,6 +324,11 @@ void ScreenMirrorComponent::setup() {
       return request->url_to(url_buf) == "/tap";
     }
     void handleRequest(AsyncWebServerRequest *request) override {
+      if (this->parent_->is_ota_in_progress()) {
+        request->send(503, "application/json", "{\"error\":\"OTA update in progress\"}");
+        return;
+      }
+
       if (!request->hasParam("x") || !request->hasParam("y")) {
         request->send(400, "application/json", "{\"error\":\"Missing x or y parameters\"}");
         return;
@@ -338,6 +362,11 @@ void ScreenMirrorComponent::setup() {
       return request->url_to(url_buf) == "/touch";
     }
     void handleRequest(AsyncWebServerRequest *request) override {
+      if (this->parent_->is_ota_in_progress()) {
+        request->send(503, "application/json", "{\"error\":\"OTA update in progress\"}");
+        return;
+      }
+
       if (!request->hasParam("action")) {
         request->send(400, "application/json", "{\"error\":\"Missing action parameter (down, move, up)\"}");
         return;
@@ -376,6 +405,11 @@ void ScreenMirrorComponent::setup() {
       return request->url_to(url_buf) == "/swipe";
     }
     void handleRequest(AsyncWebServerRequest *request) override {
+      if (this->parent_->is_ota_in_progress()) {
+        request->send(503, "application/json", "{\"error\":\"OTA update in progress\"}");
+        return;
+      }
+
       if (!request->hasParam("start_x") || !request->hasParam("start_y") ||
           !request->hasParam("end_x") || !request->hasParam("end_y")) {
         request->send(400, "application/json",
@@ -415,6 +449,11 @@ void ScreenMirrorComponent::setup() {
       return request->url_to(url_buf) == this->parent_->web_path_;
     }
     void handleRequest(AsyncWebServerRequest *request) override {
+      if (this->parent_->is_ota_in_progress()) {
+        request->send(503, "text/plain", "OTA update in progress");
+        return;
+      }
+
 #if defined(REMOTE_HTML_GZ) || __has_include("remote_html.h")
       AsyncWebServerResponse *response = request->beginResponse(
           200, "text/html", REMOTE_HTML_GZ, REMOTE_HTML_GZ_SIZE);
@@ -515,6 +554,17 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
   }
 
   int fd = httpd_req_to_sockfd(req);
+
+  if (mirror->is_ota_in_progress()) {
+    if (req->method == HTTP_GET) {
+      httpd_resp_set_status(req, "503 Service Unavailable");
+      httpd_resp_send(req, "OTA update in progress", HTTPD_RESP_USE_STRLEN);
+    }
+    if (fd >= 0) {
+      mirror->remove_ws_client(fd);
+    }
+    return ESP_FAIL;
+  }
 
   // Initial HTTP GET upgrades connection to WebSocket
   if (req->method == HTTP_GET) {
@@ -665,6 +715,11 @@ bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload
 }
 
 void ScreenMirrorComponent::add_ws_client(int fd) {
+  if (this->ota_in_progress_) {
+    this->close_dead_socket(fd);
+    return;
+  }
+
   int nodelay = 1;
   setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (char *) &nodelay, sizeof(nodelay));
 
@@ -716,6 +771,44 @@ void ScreenMirrorComponent::close_dead_socket(int fd) {
 #endif
   close(fd);
 }
+
+#ifdef USE_OTA_STATE_LISTENER
+void ScreenMirrorComponent::on_ota_global_state(ota::OTAState state, float progress, uint8_t error, ota::OTAComponent *comp) {
+  if (state == ota::OTA_STARTED || state == ota::OTA_IN_PROGRESS) {
+    if (this->ota_in_progress_) {
+      return;
+    }
+    this->ota_in_progress_ = true;
+    ESP_LOGI(TAG, "OTA update started: pausing screen mirror and disconnecting all clients");
+
+#ifdef USE_TOUCHSCREEN
+    this->swipe_gesture_.cancel();
+    if (this->is_touch_down_) {
+      this->release_touch_();
+    }
+#endif
+
+    std::vector<int> clients_to_close;
+    {
+      std::lock_guard<std::mutex> lock(this->ws_mutex_);
+      clients_to_close = this->ws_client_fds_;
+    }
+    for (int fd : clients_to_close) {
+      this->close_dead_socket(fd);
+    }
+
+    {
+      std::lock_guard<std::mutex> dirty_lock(this->dirty_mutex_);
+      this->dirty_tracker_.clear();
+    }
+    this->dirty_ = false;
+  } else if (state == ota::OTA_COMPLETED || state == ota::OTA_ABORT || state == ota::OTA_ERROR) {
+    ESP_LOGI(TAG, "OTA update finished (state=%d): resuming screen mirror", state);
+    this->ota_in_progress_ = false;
+    this->dirty_ = true;
+  }
+}
+#endif
 
 // Design Decision: Lazy hook registration for LVGL displays.
 // The default LVGL display (lv_display_get_default()) may not be registered yet during setup()
@@ -775,6 +868,8 @@ void ScreenMirrorComponent::setup_lvgl_hooks() {
 }
 
 void ScreenMirrorComponent::add_dirty_area(int x1, int y1, int x2, int y2) {
+  if (this->ota_in_progress_)
+    return;
   std::lock_guard<std::mutex> lock(this->dirty_mutex_);
   int hw_w = (this->display_ != nullptr) ? this->display_->get_native_width() : 800;
   int hw_h = (this->display_ != nullptr) ? this->display_->get_native_height() : 480;
@@ -785,7 +880,7 @@ void ScreenMirrorComponent::on_lvgl_render_ready() {
 }
 
 bool ScreenMirrorComponent::send_dirty_update() {
-  if (this->jpeg_buffer_ == nullptr)
+  if (this->ota_in_progress_ || this->jpeg_buffer_ == nullptr)
     return false;
 
   {
@@ -883,7 +978,7 @@ bool ScreenMirrorComponent::send_dirty_update() {
 }
 
 bool ScreenMirrorComponent::send_full_keyframe(int target_fd) {
-  if (this->jpeg_buffer_ == nullptr)
+  if (this->ota_in_progress_ || this->jpeg_buffer_ == nullptr)
     return false;
 
   const uint8_t *raw_buf = nullptr;
@@ -937,6 +1032,10 @@ bool ScreenMirrorComponent::send_full_keyframe(int target_fd) {
 }
 
 void ScreenMirrorComponent::loop() {
+  if (this->ota_in_progress_) {
+    return;
+  }
+
 #ifdef USE_TOUCHSCREEN
   if (this->swipe_gesture_.is_active() && this->touchscreen_ != nullptr) {
     SwipeStepOutput step_out;
@@ -976,7 +1075,8 @@ void ScreenMirrorComponent::loop() {
 
   if (has_clients) {
     FrameAction action = FrameScheduler::evaluate(millis(), this->fps_, this->gated_streaming_,
-                                                  has_dirty, has_clients, this->last_frame_time_);
+                                                  has_dirty, has_clients, this->last_frame_time_,
+                                                  this->ota_in_progress_);
     if (action == FrameAction::FULL_KEYFRAME) {
       this->send_full_keyframe(-1);
     } else if (action == FrameAction::DIRTY_DELTA) {
@@ -999,7 +1099,7 @@ void ScreenMirrorComponent::dump_config() {
 }
 
 bool ScreenMirrorComponent::capture_frame_rgb565(const uint8_t *&out_buffer, int &width, int &height) {
-  if (this->display_ == nullptr)
+  if (this->ota_in_progress_ || this->display_ == nullptr)
     return false;
 
   width = this->display_->get_native_width();
@@ -1112,6 +1212,9 @@ void ScreenMirrorComponent::release_touch_() {
 }
 
 bool ScreenMirrorComponent::simulate_tap(int x, int y, uint16_t duration_ms, int client_id) {
+  if (this->ota_in_progress_) {
+    return false;
+  }
   if (duration_ms == 0) {
     duration_ms = 80;
   }
@@ -1144,6 +1247,9 @@ bool ScreenMirrorComponent::simulate_tap(int x, int y, uint16_t duration_ms, int
 }
 
 bool ScreenMirrorComponent::simulate_touch(int x, int y, const std::string &action, int client_id) {
+  if (this->ota_in_progress_) {
+    return false;
+  }
 #ifdef USE_TOUCHSCREEN
   if (this->touchscreen_ == nullptr) {
     ESP_LOGW(TAG, "Cannot simulate touch: no touchscreen configured");
@@ -1289,6 +1395,9 @@ void ScreenMirrorComponent::simulate_touch_internal_(int x, int y, const std::st
 }
 
 bool ScreenMirrorComponent::simulate_swipe(int start_x, int start_y, int end_x, int end_y, uint16_t duration_ms, int client_id) {
+  if (this->ota_in_progress_) {
+    return false;
+  }
 #ifdef USE_TOUCHSCREEN
   if (this->touchscreen_ == nullptr) {
     ESP_LOGW(TAG, "Cannot simulate swipe: no touchscreen configured");

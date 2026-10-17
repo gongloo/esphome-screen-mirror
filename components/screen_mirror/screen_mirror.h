@@ -12,6 +12,10 @@
 #include <vector>
 #include <mutex>
 
+#ifdef USE_OTA_STATE_LISTENER
+#include "esphome/components/ota/ota_backend.h"
+#endif
+
 #include "bmp_builder.h"
 #include "exif_builder.h"
 #include "protocol.h"
@@ -24,7 +28,11 @@
 namespace esphome {
 namespace screen_mirror {
 
-class ScreenMirrorComponent : public Component {
+class ScreenMirrorComponent : public Component
+#ifdef USE_OTA_STATE_LISTENER
+    , public ota::OTAGlobalStateListener
+#endif
+{
  public:
   ScreenMirrorComponent() = default;
   ~ScreenMirrorComponent();
@@ -73,6 +81,13 @@ class ScreenMirrorComponent : public Component {
   static esp_err_t ws_handler(httpd_req_t *req);
 #endif
 
+  // OTA update handling
+#ifdef USE_OTA_STATE_LISTENER
+  void on_ota_global_state(ota::OTAState state, float progress, uint8_t error, ota::OTAComponent *comp) override;
+#endif
+  bool is_ota_in_progress() const { return this->ota_in_progress_; }
+  void set_ota_in_progress(bool in_progress) { this->ota_in_progress_ = in_progress; }
+
   // Buffer accessors
   uint8_t *get_jpeg_buffer() { return this->jpeg_buffer_; }
   size_t get_jpeg_buffer_size() const { return this->jpeg_buffer_size_; }
@@ -86,6 +101,8 @@ class ScreenMirrorComponent : public Component {
   void release_touch_();
   void simulate_touch_internal_(int x, int y, const std::string &action, int client_id = 0);
   TouchLeaseManager touch_lease_{};
+
+  std::atomic<bool> ota_in_progress_{false};
 
   display::Display *display_{nullptr};
 #ifdef USE_TOUCHSCREEN
