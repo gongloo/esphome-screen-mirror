@@ -13,3 +13,9 @@ build/
 # OS artifacts
 .DS_Store
 Thumbs.db
+
+# Test artifacts
+tests/cpp/test_runner
+tests/cpp/*.o
+tests/cpp/test_runner.dSYM/
+
