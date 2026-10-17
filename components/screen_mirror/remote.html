@@ -168,7 +168,7 @@
     }
 
     async function startContinuousPolling() {
-      while (pollingActive) {
+      while (pollingActive && document.visibilityState !== 'hidden') {
         await refreshScreen(false);
         // Rest at least 120ms between frames so ESP32 HTTP worker thread is not saturated
         await new Promise((r) => setTimeout(r, 120));
@@ -309,6 +309,9 @@
     }
 
     function initWebSocket() {
+      if (document.visibilityState === 'hidden') {
+        return;
+      }
       if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
         return;
       }
@@ -334,6 +337,11 @@
           wsConnected = false;
           pendingQueue = [];
           isDecoding = false;
+          if (document.visibilityState === 'hidden') {
+            const stat = document.getElementById('stat');
+            if (stat) stat.textContent = 'Paused (Background)';
+            return;
+          }
           const stat = document.getElementById('stat');
           if (stat) stat.textContent = 'HTTP Fallback';
           const mode = document.getElementById('mode');
@@ -511,10 +519,39 @@
     canvas.addEventListener('pointercancel', handlePointerUp);
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
+    // Tab visibility lifecycle: disconnect WebSocket and suspend polling when backgrounded
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        pollingActive = false;
+        if (ws) {
+          try { ws.close(); } catch (e) {}
+          ws = null;
+        }
+        wsConnected = false;
+        pendingQueue = [];
+        const stat = document.getElementById('stat');
+        if (stat) stat.textContent = 'Paused (Background)';
+      } else {
+        const stat = document.getElementById('stat');
+        if (stat) stat.textContent = 'Reconnecting...';
+        initWebSocket();
+      }
+    });
+
+    const cleanupConnections = () => {
+      pollingActive = false;
+      if (ws) {
+        try { ws.close(); } catch (e) {}
+        ws = null;
+      }
+    };
+    window.addEventListener('pagehide', cleanupConnections);
+    window.addEventListener('beforeunload', cleanupConnections);
+
     initWebSocket();
     // Fallback: If WebSocket does not connect within 3.5s, activate HTTP snapshot polling
     setTimeout(() => {
-      if (!wsConnected && !pollingActive) {
+      if (!wsConnected && !pollingActive && document.visibilityState !== 'hidden') {
         pollingActive = true;
         startContinuousPolling();
       }
