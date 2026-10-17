@@ -1,0 +1,50 @@
+esphome:
+  name: test-full
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "MockSSID"
+  password: "MockPassword"
+
+spi:
+  clk_pin: 12
+  mosi_pin: 11
+
+i2c:
+  sda: 1
+  scl: 2
+
+display:
+  - platform: ili9xxx
+    model: ili9341
+    cs_pin: 10
+    dc_pin: 9
+    invert_colors: false
+    dimensions:
+      width: 320
+      height: 240
+    id: test_disp
+
+touchscreen:
+  - platform: gt911
+    id: test_touch
+
+external_components:
+  - source:
+      type: local
+      path: ../../components
+
+screen_mirror:
+  display: test_disp
+  touchscreen: test_touch
+  rotation: 90
+  byte_order: big_endian
+  fps: 10.0
+  jpeg_quality: 80
+  gated_streaming: false
+  web_path: /screen
+  show_telemetry: false
