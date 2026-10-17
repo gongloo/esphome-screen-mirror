@@ -36,6 +36,7 @@ namespace esphome {
 namespace screen_mirror {
 
 static const char *const TAG = "screen_mirror";
+static ScreenMirrorComponent *s_mirror_instance = nullptr;
 
 #ifdef USE_TOUCHSCREEN
 // Accessor to dispatch simulated touch events to protected touch_listeners_
@@ -53,6 +54,9 @@ class TouchscreenAccess : public touchscreen::Touchscreen {
 
 ScreenMirrorComponent::~ScreenMirrorComponent() {
   this->release_keyframe_encoder_();
+  if (s_mirror_instance == this) {
+    s_mirror_instance = nullptr;
+  }
   if (this->jpeg_buffer_ != nullptr) {
     free(this->jpeg_buffer_);
     this->jpeg_buffer_ = nullptr;
@@ -68,6 +72,7 @@ ScreenMirrorComponent::~ScreenMirrorComponent() {
 }
 
 void ScreenMirrorComponent::init_keyframe_encoder_() {
+  std::lock_guard<std::mutex> jpeg_lock(this->jpeg_mutex_);
   if (this->keyframe_enc_handle_ != nullptr)
     return;
 
@@ -98,6 +103,7 @@ void ScreenMirrorComponent::init_keyframe_encoder_() {
 }
 
 void ScreenMirrorComponent::release_keyframe_encoder_() {
+  std::lock_guard<std::mutex> jpeg_lock(this->jpeg_mutex_);
   if (this->keyframe_enc_handle_ != nullptr) {
     jpeg_enc_close(static_cast<jpeg_enc_handle_t>(this->keyframe_enc_handle_));
     this->keyframe_enc_handle_ = nullptr;
@@ -451,7 +457,6 @@ void ScreenMirrorComponent::setup() {
     // Intercept httpd's session close callback so when any connection drops or closes,
     // its socket descriptor is immediately pruned from ws_client_fds_. This prevents
     // stale descriptors from colliding with newly opened connections (such as Home Assistant API).
-    static ScreenMirrorComponent *s_mirror_instance = nullptr;
     static httpd_close_func_t s_prev_close_fn = nullptr;
     s_mirror_instance = this;
     s_prev_close_fn = data->config.close_fn;
