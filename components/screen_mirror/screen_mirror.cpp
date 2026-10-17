@@ -1,5 +1,6 @@
 #include "screen_mirror.h"
 #include "esphome/core/log.h"
+#include "esphome/core/application.h"
 #include <cstring>
 #include <algorithm>
 #include <sys/socket.h>
@@ -570,7 +571,7 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
 }
 #endif
 
-bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload, size_t len) {
+bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload, size_t len, uint32_t max_budget_ms) {
   int sock_err = 0;
   socklen_t opt_len = sizeof(sock_err);
   if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &sock_err, &opt_len) < 0 || sock_err != 0) {
@@ -580,12 +581,17 @@ bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload
   auto ws_frame = encode_ws_frame_header(len);
 
   uint32_t elapsed_ms = 0;
-  const uint32_t max_budget_ms = 15; // 15ms hard transmission budget to protect loopTask
 
+  // Design Decision: Non-blocking unthrottled streaming with cooperative WDT feeding and select wait.
+  // We use MSG_DONTWAIT to push packets directly to lwIP network buffers as fast as Wi-Fi accepts them.
+  // If socket buffers fill (EAGAIN/EWOULDBLOCK), select() waits on the socket write descriptor up to the
+  // client's time budget. We deliberately avoid artificial sleep/delay calls between successful sends,
+  // preventing frame transmission from ballooning into hundreds of milliseconds.
   auto send_all = [](int sockfd, const uint8_t *data, size_t total, uint32_t max_budget, uint32_t &elapsed) -> bool {
     size_t sent = 0;
     uint32_t start_time = millis();
     while (sent < total) {
+      App.feed_wdt();
       uint32_t current_elapsed = (millis() - start_time) + elapsed;
       if (current_elapsed >= max_budget) {
         elapsed = current_elapsed;
@@ -613,6 +619,9 @@ bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload
           int sel = select(sockfd + 1, nullptr, &wset, nullptr, &tv);
           if (sel > 0) {
             continue;
+          }
+          if (sel == 0) {
+            continue; // Slice timed out; loop to re-check cumulative budget
           }
         }
         elapsed += (millis() - start_time);
@@ -802,9 +811,11 @@ bool ScreenMirrorComponent::send_dirty_update() {
     clients = this->ws_client_fds_;
   }
 
+  // Generous transmission budget: dynamic based on packet length (payload / 40 + 500 ms) with a 2000 ms floor
+  uint32_t delta_budget = std::max<uint32_t>(2000, total_payload_len / 40 + 500);
   std::vector<int> dead_fds;
   for (int fd : clients) {
-    if (!this->send_ws_binary_packet(fd, this->jpeg_buffer_, total_payload_len)) {
+    if (!this->send_ws_binary_packet(fd, this->jpeg_buffer_, total_payload_len, delta_budget)) {
       dead_fds.push_back(fd);
     }
   }
@@ -844,9 +855,10 @@ bool ScreenMirrorComponent::send_full_keyframe(int target_fd) {
   }
 
 #if defined(USE_ESP32) && defined(CONFIG_HTTPD_WS_SUPPORT)
+  uint32_t keyframe_budget = std::max<uint32_t>(2500, total_payload_len / 40 + 500);
   std::vector<int> dead_fds;
   if (target_fd >= 0) {
-    if (!this->send_ws_binary_packet(target_fd, this->jpeg_buffer_, total_payload_len)) {
+    if (!this->send_ws_binary_packet(target_fd, this->jpeg_buffer_, total_payload_len, keyframe_budget)) {
       dead_fds.push_back(target_fd);
     }
   } else {
@@ -856,7 +868,7 @@ bool ScreenMirrorComponent::send_full_keyframe(int target_fd) {
       clients = this->ws_client_fds_;
     }
     for (int fd : clients) {
-      if (!this->send_ws_binary_packet(fd, this->jpeg_buffer_, total_payload_len)) {
+      if (!this->send_ws_binary_packet(fd, this->jpeg_buffer_, total_payload_len, keyframe_budget)) {
         dead_fds.push_back(fd);
       }
     }

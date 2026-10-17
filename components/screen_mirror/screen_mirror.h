@@ -66,7 +66,7 @@ class ScreenMirrorComponent : public Component {
   bool send_full_keyframe(int target_fd = -1);
   void add_ws_client(int fd);
   void remove_ws_client(int fd);
-  bool send_ws_binary_packet(int fd, const uint8_t *payload, size_t len);
+  bool send_ws_binary_packet(int fd, const uint8_t *payload, size_t len, uint32_t max_budget_ms = 1500);
 
 #if defined(USE_ESP32) && defined(CONFIG_HTTPD_WS_SUPPORT)
   static esp_err_t ws_handler(httpd_req_t *req);
