@@ -9,18 +9,52 @@ Think of it as **VNC / `scrcpy` built directly into your ESP32**, accessible fro
 
 ---
 
-## Current Features
+## Salient Use Cases
 
+- 🛋️ **Remote HMI Control:** Monitor and interact with wall-mounted dashboards, campervan consoles, or enclosed touchscreens directly from your phone or desktop browser without physical access.
+- 🧪 **Automated & Headless UI Testing:** Script end-to-end interface testing in CI/CD using Python, Playwright, or `curl` to capture screenshots (`/screenshot.jpg`) and inject touch interactions (`POST /tap`) to assert UI states before firmware deploys.
+- 🤖 **AI Agent Pair Programming:** Enables autonomous AI coding agents to modify LVGL widget layouts and themes in YAML, pull screenshots to visually inspect alignments and colors, and tap through UI screens in a closed loop.
+
+---
+
+## Current Features & Capabilities
+
+- ⚡ **Delta-Region WebSocket Streaming (`/ws`):** Hooked directly into LVGL's render pipeline (`LV_EVENT_FLUSH_START`). Only modified screen bounding boxes are compressed and transmitted over WebSocket as binary JPEG tiles, reducing Wi-Fi bandwidth to ~1–5 KB/s during UI interactions.
+- 🎯 **Automatic Keyframe Escalation & Gated Streaming:**
+  - If a screen transition modifies $\ge 60\%$ of the display area, the stream automatically escalates to a full keyframe to eliminate visual tearing.
+  - With `gated_streaming: true`, zero CPU cycles and network bytes are spent when the display is idle.
 - 📸 **Hardware-Accelerated JPEG Snapshots:** High-speed JPEG capture via `GET /screenshot.jpg` powered by ESP-IDF SIMD/hardware acceleration (`esp_new_jpeg`), requiring ~0 ms extra conversion overhead.
 - 🖼️ **Raw BMP Snapshots:** Pixel-perfect uncompressed frame capture via `GET /screenshot.bmp` for exact color & alignment debugging.
-- 👆 **Direct ESPHome Touch Simulation:** Send taps via `POST /tap?x=...&y=...` with automatic screen-wake support. Taps are routed directly through ESPHome's `Touchscreen` subsystem, executing both user-defined YAML `on_touch:` automations (e.g. waking sleeping displays) and UI listeners (such as LVGL).
+- 👆 **Comprehensive Touch & Gesture Simulation:**
+  - **Single Taps:** `POST /tap?x=...&y=...` with automatic screen-wake support and guaranteed LVGL dwell times (180ms).
+  - **Continuous Drag & Touch:** `POST /touch?action=down|move|up` for sliders, scrolling, and hold gestures.
+  - **Automated Swipes:** `POST /swipe?start_x=...&end_x=...` with smooth linear interpolation.
+  - Routed directly through ESPHome's `Touchscreen` subsystem, executing both user-defined YAML `on_touch:` automations (e.g. waking sleeping displays) and UI listeners (such as LVGL).
 - 🌐 **Interactive Web Mirror (`/remote`):** Embedded, standalone HTML5 viewer preprocessed with gzip and served directly from PROGMEM:
-  - Automatic canvas rotation & coordinate transformation for 0°, 90°, 180°, and 270° orientations.
-  - Interactive click/tap-to-touch with visual ripple feedback.
-  - Live latency telemetry and direct full-screen snapshot links.
+  - Canvas rotation & coordinate transformation for 0°, 90°, 180°, and 270° orientations.
+  - Real-time pointer dragging, holds, and tap-to-touch with visual ripple feedback.
+  - Bidirectional WebSocket communication with automatic HTTP snapshot polling fallback if the socket closes.
+  - Live HUD telemetry displaying dynamic streaming rate (FPS), HTTP latency, and resolution.
 - 🎨 **Automatic Byte-Order & Endianness Handling:** Automatically detects display and LVGL byte orders (`big_endian` vs `little_endian`) to ensure 100% accurate color reproduction with zero CPU overhead.
 - 🔄 **Automatic Orientation Detection:** Seamlessly inherits display/LVGL rotation without requiring manual YAML configuration.
-- 🧩 **Display Support:** Supports ESP32-S3 RGB panels (`mipi_rgb`) as well as standard SPI displays implementing `DisplayBuffer` (e.g. ST7789, ILI9341).
+- 🧩 **Display Support:** Optimized for ESP32-S3 RGB parallel panels (`mipi_rgb`) with PSRAM and ESP-IDF. *(See compatibility matrix below).*
+
+---
+
+## Hardware & Display Compatibility
+
+### Currently Supported
+- **SoC:** ESP32-S3 with external PSRAM enabled.
+- **Framework:** ESP-IDF only (`framework: type: esp-idf`).
+- **Displays:** RGB parallel panels driven by the ESPHome **`mipi_rgb`** component (e.g., Waveshare 4.3"/7", Guition ESP32-S3-4848S040, Sunton ESP32-S3 800x480).
+- **UI Framework:** LVGL is recommended/required for real-time delta WebSocket streaming (`/ws`). Non-LVGL setups can poll static HTTP snapshots.
+
+### Not Supported (Future Roadmap)
+- **SPI / I2C / Parallel 8080 Displays (`st7789v`, `ili9341`, `gc9a01`, etc.):** The component directly accesses the hardware scanout framebuffer in PSRAM via `esp_lcd_rgb_panel_get_frame_buffer()`. Reading back from `display::DisplayBuffer::buffer_` is not implemented at this time.
+- **Monochrome & E-Paper Displays (`ssd1306`, `waveshare_epaper`, etc.):** The hardware JPEG encoder and BMP generator require 16-bit RGB565 buffers and do not support 1-bit bitmasks or grayscale LUTs.
+- **Non-ESP32 Architectures:** ESP8266, RP2040, and other microcontrollers are not supported.
+
+> **Note:** While an adapter for standard SPI/I2C `DisplayBuffer` displays may be considered in the future, it is not currently prioritized or implemented. Pull requests are welcome!
 
 ---
 
@@ -38,7 +72,7 @@ screen_mirror:
   id: hmi_mirror               # Optional: component ID
   display: rpi_disp            # Required: reference to display component
   touchscreen: my_touchscreen  # Optional: reference to touchscreen (required for tap simulation & web mirror clicks)
-  fps: 1.0                     # Optional: max framerate (default: 1.0, range: 0.1 - 10.0)
+  fps: 1.0                     # Optional: max delta framerate (default: 1.0, range: 0.1 - 30.0)
   jpeg_quality: 75             # Optional: JPEG quality (default: 75, range: 10 - 100)
   gated_streaming: true        # Optional: skip frames when screen has no changes (default: true)
   web_path: "/remote"          # Optional: web viewer URL path (default: /remote)
@@ -56,26 +90,27 @@ screen_mirror:
 
 | Endpoint | Method / Protocol | Description |
 | :--- | :--- | :--- |
-| `/remote` | `GET` | Interactive web mirror with live preview, pointer dragging, and touch simulation. |
-| `/ws` | `WebSocket` | Ultra-low latency touch event streaming (`T <x> <y>`, `D <x> <y>`, `M <x> <y>`, `U <x> <y>`). |
-| `/screenshot.jpg` | `GET` | Hardware-accelerated JPEG snapshot of current screen. |
-| `/screenshot.bmp` | `GET` | Uncompressed 16-bit RGB565 BMP snapshot. |
-| `/mirror/info` | `GET` | JSON metadata (resolution, rotation, byte order, memory). |
-| `/tap?x=..&y=..` | `POST` | Simulate a touch tap at raw hardware coordinates `(x, y)` (`duration_ms` optional, default 180ms). |
+| `/remote` | `GET` | Interactive web mirror with live preview, pointer dragging, touch simulation, and HUD telemetry. |
+| `/ws` | `WebSocket` | **Bidirectional streaming channel:**<br>• Device-to-client: Binary delta JPEG tiles (`0x44`) and full keyframes (`0x46`).<br>• Client-to-device: Low-latency touch events (`T`, `D`, `M`, `U`) and keyframe requests (`K`). |
+| `/screenshot.jpg` | `GET` | Hardware-accelerated JPEG snapshot of current screen (`/screenshot.jpeg` also supported). |
+| `/screenshot.bmp` | `GET` | Uncompressed 16-bit RGB565 BMP snapshot for pixel-perfect debugging. |
+| `/mirror/info` | `GET` | JSON metadata (resolution, rotation, byte order, target FPS, JPEG quality, memory stats). |
+| `/tap?x=..&y=..` | `POST` | Simulate a touch tap at raw hardware coordinates `(x, y)` (`duration` ms optional, default 180ms). |
 | `/touch?x=..&y=..&action=..` | `POST` | Continuous touch state injection (`action=down`, `move`, `up`) for live dragging & holds. |
 | `/swipe?start_x=..&start_y=..&end_x=..&end_y=..` | `POST` | Discrete swipe/drag gesture interpolation (`duration` ms optional, default 300ms). |
 
 ---
 
-## Roadmap & Upcoming Features
+## Roadmap & Status
 
-- [x] Phase 1: Hardware-accelerated JPEG (`/screenshot.jpg`) and BMP (`/screenshot.bmp`) capture.
-- [x] Phase 2: Touch input simulation (`POST /tap`) via ESPHome `Touchscreen` subsystem.
-- [x] Phase 2.5: Interactive web UI (`/remote`) with auto-rotation, coordinate transformation, and build-time gzip asset embedding.
-- [x] Phase 3: Full gesture & low-latency touch suite: real-time WebSocket touch streaming (`/ws`), discrete swipe gestures (`POST /swipe`), continuous touch tracking (`POST /touch` with down/move/up), and web mirror pointer dragging with guaranteed LVGL sampling dwell times (180ms).
-- [ ] Phase 4: Tile-based delta blitting via WebSockets for ultra-low bandwidth streaming.
-
-For the comprehensive architectural specification, see [SPEC.md](SPEC.md).
+- [x] **Phase 1: Hardware-Accelerated Snapshots:** Fast JPEG (`/screenshot.jpg`) and uncompressed BMP (`/screenshot.bmp`) endpoints powered by `esp_new_jpeg`.
+- [x] **Phase 2: Touch Input Simulation:** ESPHome `Touchscreen` integration for waking sleeping screens, single taps (`POST /tap`), and auto-rotation mapping.
+- [x] **Phase 2.5: Interactive Embedded Web UI:** Lightweight HTML5 mirror served from PROGMEM at `/remote` with touch ripple feedback and zero external CDN dependencies.
+- [x] **Phase 3: Gestures & Drag Controls:** Swipe gestures (`POST /swipe`), continuous touch tracking (`POST /touch`), and canvas pointer dragging.
+- [x] **Phase 4: Real-Time Delta Tile WebSocket Streaming:** Live delta blitting (`/ws`), idle gating, automatic keyframe escalation, and graceful FPS coalescing.
+- [ ] **Future / Community Contributions:**
+  - `DisplayBuffer` adapter for SPI / I2C displays (e.g. ST7789, ILI9341).
+  - Multi-client connection optimizations.
 
 ---
 

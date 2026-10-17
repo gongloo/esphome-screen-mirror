@@ -60,6 +60,10 @@ void ScreenMirrorComponent::setup() {
   int w = (this->display_ != nullptr) ? this->display_->get_native_width() : 800;
   int h = (this->display_ != nullptr) ? this->display_->get_native_height() : 480;
 
+  // Design Decision: Static Buffer Pre-Allocation in PSRAM.
+  // Working buffers for JPEG encoding and tile extraction are pre-allocated statically at boot.
+  // This guarantees zero dynamic heap allocations per frame during streaming, eliminating heap
+  // fragmentation and OOM failures over weeks/months of continuous operation.
   this->jpeg_buffer_size_ = 256 * 1024; // 256 KB buffer for compressed JPEG
   this->jpeg_buffer_ = (uint8_t *) heap_caps_malloc(this->jpeg_buffer_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (this->jpeg_buffer_ == nullptr) {
@@ -659,7 +663,11 @@ bool ScreenMirrorComponent::send_dirty_update() {
   if (x1 + w > hw_w) w = hw_w - x1;
   if (y1 + h > hw_h) h = hw_h - y1;
 
-  // If dirty region covers more than 60% of the display, send a full keyframe
+  // Design Decision: Automatic Keyframe Escalation.
+  // If the accumulated dirty bounding box covers >= 60% of the display area (e.g. full-screen
+  // page navigation or complex animations), escalate to sending a full keyframe rather than
+  // extracting and streaming a large partial tile. This prevents visual tearing and reduces
+  // tile extraction CPU overhead.
   if ((w * h) >= (hw_w * hw_h * 6 / 10)) {
     return this->send_full_keyframe(-1);
   }
@@ -809,6 +817,10 @@ void ScreenMirrorComponent::loop() {
         this->has_dirty_rect_ = false;
       }
     }
+    // Design Decision: Non-Blocking FPS Throttling & Bounding Box Coalescing.
+    // When screen redraws exceed the target FPS, individual dirty rects are unioned/coalesced
+    // in mark_dirty_rect() without blocking this loop or stalling LVGL rendering on the device.
+    // Once min_interval_ms has elapsed, the single aggregated bounding box is transmitted.
     if (this->has_dirty_rect_) {
       uint32_t now = millis();
       uint32_t min_interval_ms = (this->fps_ > 0.0f) ? static_cast<uint32_t>(1000.0f / this->fps_) : 66;
@@ -839,7 +851,10 @@ bool ScreenMirrorComponent::capture_frame_rgb565(const uint8_t *&out_buffer, int
   height = this->display_->get_native_height();
 
 #if __has_include("esphome/components/mipi_rgb/mipi_rgb.h") && __has_include("esp_lcd_panel_rgb.h")
-  // For MIPI RGB panels, read the active hardware PSRAM scanout framebuffer
+  // Design Decision: Direct Hardware Scanout DMA Access.
+  // On ESP32-S3 RGB panels, LVGL streams pixel data directly into the ESP-IDF hardware RGB panel.
+  // The hardware DMA scanout framebuffer in PSRAM (obtained via esp_lcd_rgb_panel_get_frame_buffer)
+  // is the only location containing the active, fully composited screen image.
   class MipiRgbAccessor : public esphome::mipi_rgb::MipiRgb {
    public:
     esp_lcd_panel_handle_t get_panel_handle() { return this->handle_; }
@@ -999,7 +1014,10 @@ bool ScreenMirrorComponent::simulate_touch(int x, int y, const std::string &acti
     tp.x_raw = x;
     tp.y_raw = y;
 
-    // Fire on_touch trigger (e.g. wakes screen from sleep)
+    // Design Decision: Touchscreen Subsystem Indirection.
+    // Dispatched directly through ESPHome's Touchscreen subsystem rather than bypassing it into LVGL.
+    // This guarantees that display wake-on-touch routines, YAML on_touch: triggers, and UI event
+    // listeners execute identically to physical hardware touch controller interrupts.
     this->touchscreen_->get_touch_trigger()->trigger(tp, {tp});
 
     // Notify all registered listeners (LVGL)
@@ -1036,6 +1054,11 @@ bool ScreenMirrorComponent::simulate_touch(int x, int y, const std::string &acti
 
   } else if (action == "up") {
     uint32_t elapsed = millis() - this->last_touch_down_time_;
+    // Design Decision: LVGL Touch Dwell Time Guarantee.
+    // Enforce a minimum 180ms touch hold time on the device. Because LVGL's input indev handler
+    // runs periodically in ticks (typically every 30-50ms), a momentary touch release (<100ms)
+    // might be missed across loop latency spikes. 180ms guarantees multi-tick sampling while
+    // staying comfortably below LVGL's default 400ms long-press threshold.
     const uint32_t min_hold_ms = 180;
     if (this->is_touch_down_ && elapsed < min_hold_ms) {
       uint32_t delay_ms = min_hold_ms - elapsed;
