@@ -852,16 +852,16 @@ void ScreenMirrorComponent::loop() {
 
       if (elapsed >= this->active_swipe_.duration_ms) {
         // Final coordinate
-        this->simulate_touch(this->active_swipe_.end_x, this->active_swipe_.end_y, "move");
+        this->simulate_touch_internal_(this->active_swipe_.end_x, this->active_swipe_.end_y, "move");
         // Release touch
-        this->simulate_touch(this->active_swipe_.end_x, this->active_swipe_.end_y, "up");
+        this->simulate_touch_internal_(this->active_swipe_.end_x, this->active_swipe_.end_y, "up");
         this->active_swipe_.active = false;
         ESP_LOGD(TAG, "Swipe completed at (%d, %d)", this->active_swipe_.end_x, this->active_swipe_.end_y);
       } else {
         float progress = (float) elapsed / (float) this->active_swipe_.duration_ms;
         int current_x = this->active_swipe_.start_x + (int) ((this->active_swipe_.end_x - this->active_swipe_.start_x) * progress);
         int current_y = this->active_swipe_.start_y + (int) ((this->active_swipe_.end_y - this->active_swipe_.start_y) * progress);
-        this->simulate_touch(current_x, current_y, "move");
+        this->simulate_touch_internal_(current_x, current_y, "move");
       }
     }
   }
@@ -1033,26 +1033,33 @@ bool ScreenMirrorComponent::simulate_tap(int x, int y, uint16_t duration_ms) {
   if (duration_ms == 0) {
     duration_ms = 80;
   }
-  ESP_LOGD(TAG, "Simulating tap at (%d, %d) for %u ms", x, y, duration_ms);
-
 #ifdef USE_TOUCHSCREEN
-  if (this->touchscreen_ != nullptr) {
+  if (this->touchscreen_ == nullptr) {
+    ESP_LOGW(TAG, "Cannot simulate tap: no touchscreen component configured under screen_mirror");
+    return false;
+  }
+
+  int hw_w = (this->display_ != nullptr) ? this->display_->get_native_width() : 800;
+  int hw_h = (this->display_ != nullptr) ? this->display_->get_native_height() : 480;
+  x = std::max(0, std::min(hw_w - 1, x));
+  y = std::max(0, std::min(hw_h - 1, y));
+
+  // Marshal execution to main loop task for LVGL and ESPHome thread safety
+  this->defer([this, x, y, duration_ms]() {
+    ESP_LOGD(TAG, "Executing tap at (%d, %d) for %u ms on main loop", x, y, duration_ms);
     this->cancel_timeout("release_tap");
     this->cancel_timeout("min_touch_hold");
 
-    // 1. Send touch down
-    this->simulate_touch(x, y, "down");
-
-    // 2. Schedule release after duration_ms
+    this->simulate_touch_internal_(x, y, "down");
     this->set_timeout("release_tap", duration_ms, [this]() {
       this->release_touch_();
     });
-    return true;
-  }
-#endif
-
-  ESP_LOGW(TAG, "Cannot simulate tap: no touchscreen component configured under screen_mirror");
+  });
+  return true;
+#else
+  ESP_LOGW(TAG, "Cannot simulate tap: touchscreen support not compiled in");
   return false;
+#endif
 }
 
 bool ScreenMirrorComponent::simulate_touch(int x, int y, const std::string &action) {
@@ -1067,9 +1074,28 @@ bool ScreenMirrorComponent::simulate_touch(int x, int y, const std::string &acti
   x = std::max(0, std::min(hw_w - 1, x));
   y = std::max(0, std::min(hw_h - 1, y));
 
-  this->cancel_timeout("min_touch_hold");
+  // Marshal execution to main loop task for LVGL and ESPHome thread safety
+  this->defer([this, x, y, action]() {
+    this->simulate_touch_internal_(x, y, action);
+  });
+  return true;
+#else
+  return false;
+#endif
+}
+
+void ScreenMirrorComponent::simulate_touch_internal_(int x, int y, const std::string &action) {
+#ifdef USE_TOUCHSCREEN
+  if (this->touchscreen_ == nullptr) return;
 
   if (action == "down") {
+    // If a touch was already down, cleanly release it first before starting a new touch
+    if (this->is_touch_down_) {
+      this->release_touch_();
+    }
+    this->cancel_timeout("min_touch_hold");
+    this->cancel_timeout("release_tap");
+
     this->last_touch_down_time_ = millis();
     this->last_touch_x_ = x;
     this->last_touch_y_ = y;
@@ -1095,9 +1121,13 @@ bool ScreenMirrorComponent::simulate_touch(int x, int y, const std::string &acti
     }
     this->is_touch_down_ = true;
     this->mark_dirty();
-    return true;
 
   } else if (action == "move") {
+    if (!this->is_touch_down_) {
+      // If move arrives without preceding down, initialize down state at current coordinate
+      this->simulate_touch_internal_(x, y, "down");
+      return;
+    }
     this->last_touch_x_ = x;
     this->last_touch_y_ = y;
 
@@ -1118,9 +1148,11 @@ bool ScreenMirrorComponent::simulate_touch(int x, int y, const std::string &acti
     }
     this->is_touch_down_ = true;
     this->mark_dirty();
-    return true;
 
   } else if (action == "up") {
+    if (!this->is_touch_down_) {
+      return;
+    }
     uint32_t elapsed = millis() - this->last_touch_down_time_;
     // Design Decision: LVGL Touch Dwell Time Guarantee.
     // Enforce a minimum 180ms touch hold time on the device. Because LVGL's input indev handler
@@ -1128,21 +1160,18 @@ bool ScreenMirrorComponent::simulate_touch(int x, int y, const std::string &acti
     // might be missed across loop latency spikes. 180ms guarantees multi-tick sampling while
     // staying comfortably below LVGL's default 400ms long-press threshold.
     const uint32_t min_hold_ms = 180;
-    if (this->is_touch_down_ && elapsed < min_hold_ms) {
+    if (elapsed < min_hold_ms) {
       uint32_t delay_ms = min_hold_ms - elapsed;
       this->set_timeout("min_touch_hold", delay_ms, [this]() {
         this->release_touch_();
       });
-      return true;
+      return;
     }
     this->release_touch_();
-    return true;
-  }
 
-  ESP_LOGW(TAG, "Invalid touch action: %s (expected 'down', 'move', or 'up')", action.c_str());
-  return false;
-#else
-  return false;
+  } else {
+    ESP_LOGW(TAG, "Invalid touch action: %s (expected 'down', 'move', or 'up')", action.c_str());
+  }
 #endif
 }
 
@@ -1162,25 +1191,28 @@ bool ScreenMirrorComponent::simulate_swipe(int start_x, int start_y, int end_x, 
 
   duration_ms = std::max<uint16_t>(50, duration_ms);
 
-  if (this->active_swipe_.active || this->is_touch_down_) {
-    this->release_touch_();
-  }
+  // Marshal swipe initialization to main loop task
+  this->defer([this, start_x, start_y, end_x, end_y, duration_ms]() {
+    if (this->active_swipe_.active || this->is_touch_down_) {
+      this->release_touch_();
+    }
 
-  ESP_LOGD(TAG, "Starting swipe from (%d, %d) to (%d, %d) over %u ms",
-           start_x, start_y, end_x, end_y, duration_ms);
+    ESP_LOGD(TAG, "Starting swipe from (%d, %d) to (%d, %d) over %u ms on main loop",
+             start_x, start_y, end_x, end_y, duration_ms);
 
-  // 1. Initial touch down at start coordinates
-  this->simulate_touch(start_x, start_y, "down");
+    // 1. Initial touch down at start coordinates
+    this->simulate_touch_internal_(start_x, start_y, "down");
 
-  // 2. Initialize active swipe state for loop() interpolation
-  this->active_swipe_.active = true;
-  this->active_swipe_.start_x = start_x;
-  this->active_swipe_.start_y = start_y;
-  this->active_swipe_.end_x = end_x;
-  this->active_swipe_.end_y = end_y;
-  this->active_swipe_.start_time = millis();
-  this->active_swipe_.duration_ms = duration_ms;
-  this->active_swipe_.last_step_time = millis();
+    // 2. Initialize active swipe state for loop() interpolation
+    this->active_swipe_.start_x = start_x;
+    this->active_swipe_.start_y = start_y;
+    this->active_swipe_.end_x = end_x;
+    this->active_swipe_.end_y = end_y;
+    this->active_swipe_.start_time = millis();
+    this->active_swipe_.duration_ms = duration_ms;
+    this->active_swipe_.last_step_time = millis();
+    this->active_swipe_.active = true;
+  });
 
   return true;
 #else

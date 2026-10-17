@@ -73,6 +73,7 @@ class ScreenMirrorComponent : public Component {
 
  protected:
   void release_touch_();
+  void simulate_touch_internal_(int x, int y, const std::string &action);
 
   display::Display *display_{nullptr};
 #ifdef USE_TOUCHSCREEN
