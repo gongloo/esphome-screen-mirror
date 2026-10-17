@@ -36,6 +36,7 @@ namespace esphome {
 namespace screen_mirror {
 
 static const char *const TAG = "screen_mirror";
+static ScreenMirrorComponent *s_mirror_instance = nullptr;
 
 #ifdef USE_TOUCHSCREEN
 // Accessor to dispatch simulated touch events to protected touch_listeners_
@@ -52,9 +53,9 @@ class TouchscreenAccess : public touchscreen::Touchscreen {
 #endif
 
 ScreenMirrorComponent::~ScreenMirrorComponent() {
-  if (this->keyframe_enc_handle_ != nullptr) {
-    jpeg_enc_close(static_cast<jpeg_enc_handle_t>(this->keyframe_enc_handle_));
-    this->keyframe_enc_handle_ = nullptr;
+  this->release_keyframe_encoder_();
+  if (s_mirror_instance == this) {
+    s_mirror_instance = nullptr;
   }
   if (this->jpeg_buffer_ != nullptr) {
     free(this->jpeg_buffer_);
@@ -70,60 +71,20 @@ ScreenMirrorComponent::~ScreenMirrorComponent() {
   }
 }
 
-void ScreenMirrorComponent::setup() {
-  ESP_LOGCONFIG(TAG, "Setting up Screen Mirror component...");
+void ScreenMirrorComponent::init_keyframe_encoder_() {
+  std::lock_guard<std::mutex> jpeg_lock(this->jpeg_mutex_);
+  if (this->keyframe_enc_handle_ != nullptr)
+    return;
 
-  if (this->rotation_ == 0 && this->display_ != nullptr) {
-    this->rotation_ = static_cast<uint16_t>(this->display_->get_rotation());
+  size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (is_dram_low_for_delta(free_internal, 35 * 1024)) {
+    ESP_LOGW(TAG, "Low internal DRAM (%zu bytes free); skipping session keyframe encoder init", free_internal);
+    return;
   }
 
   int w = (this->display_ != nullptr) ? this->display_->get_native_width() : 800;
   int h = (this->display_ != nullptr) ? this->display_->get_native_height() : 480;
 
-  // Design Decision: Static Buffer Pre-Allocation in PSRAM.
-  // Working buffers for JPEG encoding and tile extraction are pre-allocated statically at boot.
-  // This guarantees zero dynamic heap allocations per frame during streaming, eliminating heap
-  // fragmentation and OOM failures over weeks/months of continuous operation.
-  this->jpeg_buffer_size_ = 256 * 1024; // 256 KB buffer for compressed WebSocket JPEG frames
-  this->jpeg_buffer_ = (uint8_t *) heap_caps_malloc(this->jpeg_buffer_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (this->jpeg_buffer_ == nullptr) {
-    this->jpeg_buffer_ = (uint8_t *) malloc(this->jpeg_buffer_size_);
-  }
-
-  if (this->jpeg_buffer_ == nullptr) {
-    ESP_LOGE(TAG, "Failed to allocate WebSocket JPEG buffer!");
-  } else {
-    ESP_LOGI(TAG, "Allocated %u KB WebSocket JPEG buffer in PSRAM", (unsigned)(this->jpeg_buffer_size_ / 1024));
-  }
-
-  // Allocate dedicated HTTP snapshot buffer to avoid clobbering live WS stream
-  this->http_jpeg_buffer_size_ = 256 * 1024;
-  this->http_jpeg_buffer_ = (uint8_t *) heap_caps_malloc(this->http_jpeg_buffer_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (this->http_jpeg_buffer_ == nullptr) {
-    this->http_jpeg_buffer_ = (uint8_t *) malloc(this->http_jpeg_buffer_size_);
-  }
-  if (this->http_jpeg_buffer_ != nullptr) {
-    ESP_LOGI(TAG, "Allocated %u KB HTTP snapshot JPEG buffer in PSRAM", (unsigned)(this->http_jpeg_buffer_size_ / 1024));
-  }
-
-  // Allocate tile scratch buffer for extracting dirty sub-rectangles (512 KB in PSRAM, fallback to 128 KB)
-  this->tile_scratch_size_ = 512 * 1024;
-  this->tile_scratch_ = (uint8_t *) heap_caps_malloc(this->tile_scratch_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (this->tile_scratch_ == nullptr) {
-    this->tile_scratch_size_ = 128 * 1024;
-    this->tile_scratch_ = (uint8_t *) heap_caps_malloc(this->tile_scratch_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  }
-  if (this->tile_scratch_ == nullptr) {
-    this->tile_scratch_ = (uint8_t *) malloc(this->tile_scratch_size_);
-  }
-  if (this->tile_scratch_ != nullptr) {
-    ESP_LOGI(TAG, "Allocated %u KB tile extraction scratch buffer in PSRAM", (unsigned)(this->tile_scratch_size_ / 1024));
-  }
-
-  // Install LVGL dirty region invalidation and render-ready hooks
-  this->setup_lvgl_hooks();
-
-  // Initialize persistent JPEG encoder handle for full keyframes (fixed native width & height)
   jpeg_enc_config_t keyframe_cfg = DEFAULT_JPEG_ENC_CONFIG();
   keyframe_cfg.width = w;
   keyframe_cfg.height = h;
@@ -135,10 +96,65 @@ void ScreenMirrorComponent::setup() {
   jpeg_enc_handle_t kf_handle = nullptr;
   if (jpeg_enc_open(&keyframe_cfg, &kf_handle) == JPEG_ERR_OK && kf_handle != nullptr) {
     this->keyframe_enc_handle_ = kf_handle;
-    ESP_LOGI(TAG, "Persistent keyframe JPEG encoder initialized (%dx%d, Q%u)", w, h, this->jpeg_quality_);
+    ESP_LOGI(TAG, "Session keyframe JPEG encoder initialized (%dx%d, Q%u)", w, h, this->jpeg_quality_);
   } else {
-    ESP_LOGW(TAG, "Failed to initialize persistent keyframe JPEG encoder; will fallback to per-frame open");
+    ESP_LOGW(TAG, "Failed to initialize session keyframe JPEG encoder; will fallback to per-frame open");
   }
+}
+
+void ScreenMirrorComponent::release_keyframe_encoder_() {
+  std::lock_guard<std::mutex> jpeg_lock(this->jpeg_mutex_);
+  if (this->keyframe_enc_handle_ != nullptr) {
+    jpeg_enc_close(static_cast<jpeg_enc_handle_t>(this->keyframe_enc_handle_));
+    this->keyframe_enc_handle_ = nullptr;
+    ESP_LOGI(TAG, "Session keyframe JPEG encoder closed; internal DRAM released");
+  }
+}
+
+void ScreenMirrorComponent::setup() {
+  ESP_LOGCONFIG(TAG, "Setting up Screen Mirror component...");
+
+  if (this->rotation_ == 0 && this->display_ != nullptr) {
+    this->rotation_ = static_cast<uint16_t>(this->display_->get_rotation());
+  }
+
+  // Design Decision: Static Buffer Pre-Allocation in PSRAM.
+  // Working buffers for JPEG encoding and tile extraction are pre-allocated statically in PSRAM.
+  // This guarantees zero dynamic heap allocations per frame during streaming, eliminating heap
+  // fragmentation and OOM failures over weeks/months of continuous operation.
+  this->jpeg_buffer_size_ = 256 * 1024; // 256 KB buffer for compressed WebSocket JPEG frames
+  this->jpeg_buffer_ = (uint8_t *) heap_caps_malloc(this->jpeg_buffer_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (this->jpeg_buffer_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate WebSocket JPEG buffer in PSRAM!");
+    this->mark_failed();
+    return;
+  }
+  ESP_LOGI(TAG, "Allocated %u KB WebSocket JPEG buffer in PSRAM", (unsigned)(this->jpeg_buffer_size_ / 1024));
+
+  // Allocate dedicated HTTP snapshot buffer in PSRAM to avoid clobbering live WS stream
+  this->http_jpeg_buffer_size_ = 256 * 1024;
+  this->http_jpeg_buffer_ = (uint8_t *) heap_caps_malloc(this->http_jpeg_buffer_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (this->http_jpeg_buffer_ != nullptr) {
+    ESP_LOGI(TAG, "Allocated %u KB HTTP snapshot JPEG buffer in PSRAM", (unsigned)(this->http_jpeg_buffer_size_ / 1024));
+  } else {
+    ESP_LOGW(TAG, "Failed to allocate HTTP snapshot JPEG buffer in PSRAM");
+  }
+
+  // Allocate tile scratch buffer in PSRAM for extracting dirty sub-rectangles (512 KB in PSRAM, fallback to 128 KB)
+  this->tile_scratch_size_ = 512 * 1024;
+  this->tile_scratch_ = (uint8_t *) heap_caps_malloc(this->tile_scratch_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (this->tile_scratch_ == nullptr) {
+    this->tile_scratch_size_ = 128 * 1024;
+    this->tile_scratch_ = (uint8_t *) heap_caps_malloc(this->tile_scratch_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  }
+  if (this->tile_scratch_ != nullptr) {
+    ESP_LOGI(TAG, "Allocated %u KB tile extraction scratch buffer in PSRAM", (unsigned)(this->tile_scratch_size_ / 1024));
+  } else {
+    ESP_LOGW(TAG, "Failed to allocate tile scratch buffer in PSRAM; delta streaming will be disabled");
+  }
+
+  // Install LVGL dirty region invalidation and render-ready hooks
+  this->setup_lvgl_hooks();
 
   if (web_server_base::global_web_server_base == nullptr) {
     ESP_LOGW(TAG, "No web_server_base registered; remote endpoints will be unavailable.");
@@ -441,7 +457,6 @@ void ScreenMirrorComponent::setup() {
     // Intercept httpd's session close callback so when any connection drops or closes,
     // its socket descriptor is immediately pruned from ws_client_fds_. This prevents
     // stale descriptors from colliding with newly opened connections (such as Home Assistant API).
-    static ScreenMirrorComponent *s_mirror_instance = nullptr;
     static httpd_close_func_t s_prev_close_fn = nullptr;
     s_mirror_instance = this;
     s_prev_close_fn = data->config.close_fn;
@@ -623,6 +638,9 @@ void ScreenMirrorComponent::add_ws_client(int fd) {
   if (std::find(this->ws_client_fds_.begin(), this->ws_client_fds_.end(), fd) == this->ws_client_fds_.end()) {
     this->ws_client_fds_.push_back(fd);
     ESP_LOGI(TAG, "WebSocket client registered (fd: %d, total active: %zu)", fd, this->ws_client_fds_.size());
+    if (this->ws_client_fds_.size() == 1) {
+      this->init_keyframe_encoder_();
+    }
   }
 }
 
@@ -632,6 +650,9 @@ void ScreenMirrorComponent::remove_ws_client(int fd) {
   if (it != this->ws_client_fds_.end()) {
     this->ws_client_fds_.erase(it);
     ESP_LOGI(TAG, "WebSocket client removed (fd: %d, total active: %zu)", fd, this->ws_client_fds_.size());
+    if (this->ws_client_fds_.empty()) {
+      this->release_keyframe_encoder_();
+    }
   }
   if (this->touch_lease_.get_active_client() == fd) {
     this->touch_lease_.handle_disconnect(fd);
@@ -956,10 +977,10 @@ bool ScreenMirrorComponent::encode_jpeg(const uint8_t *rgb565_buffer, int width,
     enc_handle = static_cast<jpeg_enc_handle_t>(this->keyframe_enc_handle_);
     is_persistent = true;
   } else {
-    // Dynamic tile: apply pre-flight internal DRAM guard (require at least 35 KB free internal memory)
+    // Dynamic tile or unmanaged keyframe: apply pre-flight internal DRAM guard (require at least 35 KB free internal memory)
     size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (is_dram_low_for_delta(free_internal, 35 * 1024)) {
-      ESP_LOGW(TAG, "Skipping tile encode: low internal DRAM (%zu bytes free)", free_internal);
+      ESP_LOGW(TAG, "Skipping encode: low internal DRAM (%zu bytes free)", free_internal);
       return false;
     }
 
@@ -973,7 +994,7 @@ bool ScreenMirrorComponent::encode_jpeg(const uint8_t *rgb565_buffer, int width,
 
     jpeg_error_t open_err = jpeg_enc_open(&cfg, &enc_handle);
     if (open_err != JPEG_ERR_OK || enc_handle == nullptr) {
-      ESP_LOGE(TAG, "jpeg_enc_open failed for tile (%dx%d): %d", width, height, open_err);
+      ESP_LOGE(TAG, "jpeg_enc_open failed for frame (%dx%d): %d", width, height, open_err);
       return false;
     }
   }

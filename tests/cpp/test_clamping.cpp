@@ -72,4 +72,11 @@ TEST_CASE("DRAM Pre-flight Guard Threshold via production is_dram_low_for_delta"
   SUBCASE("Severe memory pressure (e.g. 10 KB free)") {
     CHECK(is_dram_low_for_delta(10000) == true);
   }
+
+  SUBCASE("Session keyframe encoder init guard matches threshold") {
+    // 35 KB requirement protects against heap exhaustion on ESP32-S3
+    constexpr size_t threshold_35k = 35 * 1024;
+    CHECK(is_dram_low_for_delta(threshold_35k, threshold_35k) == false);
+    CHECK(is_dram_low_for_delta(threshold_35k - 1, threshold_35k) == true);
+  }
 }

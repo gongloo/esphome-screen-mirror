@@ -45,7 +45,7 @@ class ScreenMirrorComponent : public Component {
   void setup() override;
   void loop() override;
   void dump_config() override;
-  float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
+  float get_setup_priority() const override { return setup_priority::LATE; }
 
   // Frame capture and encoding APIs
   bool capture_frame_rgb565(const uint8_t *&out_buffer, int &width, int &height);
@@ -79,6 +79,8 @@ class ScreenMirrorComponent : public Component {
   size_t get_http_jpeg_buffer_size() const { return this->http_jpeg_buffer_size_; }
 
  protected:
+  void init_keyframe_encoder_();
+  void release_keyframe_encoder_();
   void release_touch_();
   void simulate_touch_internal_(int x, int y, const std::string &action, int client_id = 0);
   TouchLeaseManager touch_lease_{};
