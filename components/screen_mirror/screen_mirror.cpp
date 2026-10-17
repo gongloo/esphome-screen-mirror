@@ -50,6 +50,17 @@ class TouchscreenAccess : public touchscreen::Touchscreen {
 #include "remote_html.h"
 #endif
 
+ScreenMirrorComponent::~ScreenMirrorComponent() {
+  if (this->jpeg_buffer_ != nullptr) {
+    free(this->jpeg_buffer_);
+    this->jpeg_buffer_ = nullptr;
+  }
+  if (this->tile_scratch_ != nullptr) {
+    free(this->tile_scratch_);
+    this->tile_scratch_ = nullptr;
+  }
+}
+
 void ScreenMirrorComponent::setup() {
   ESP_LOGCONFIG(TAG, "Setting up Screen Mirror component...");
 
@@ -161,9 +172,19 @@ void ScreenMirrorComponent::setup() {
       httpd_resp_set_type(*request, "image/bmp");
       httpd_resp_set_hdr(*request, "Cache-Control", "no-cache, no-store, must-revalidate");
       httpd_resp_set_hdr(*request, "Access-Control-Allow-Origin", "*");
-      httpd_resp_send_chunk(*request, reinterpret_cast<const char *>(header), sizeof(header));
-      httpd_resp_send_chunk(*request, reinterpret_cast<const char *>(buffer), image_bytes);
-      httpd_resp_send_chunk(*request, nullptr, 0);
+      if (httpd_resp_send_chunk(*request, reinterpret_cast<const char *>(header), sizeof(header)) == ESP_OK) {
+        const size_t chunk_size = 4096;
+        size_t offset = 0;
+        esp_err_t err = ESP_OK;
+        while (offset < image_bytes && err == ESP_OK) {
+          size_t to_send = std::min(chunk_size, image_bytes - offset);
+          err = httpd_resp_send_chunk(*request, reinterpret_cast<const char *>(buffer + offset), to_send);
+          offset += to_send;
+        }
+        if (err == ESP_OK) {
+          httpd_resp_send_chunk(*request, nullptr, 0);
+        }
+      }
     }
   };
 
@@ -368,7 +389,7 @@ void ScreenMirrorComponent::setup() {
       .handler = ScreenMirrorComponent::ws_handler,
       .user_ctx = this,
       .is_websocket = true,
-      .handle_ws_control_frames = false,
+      .handle_ws_control_frames = true,
       .supported_subprotocol = nullptr,
     };
     esp_err_t err = httpd_register_uri_handler(hd, &ws_uri);
@@ -392,9 +413,9 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
   }
 
   int fd = httpd_req_to_sockfd(req);
-  mirror->add_ws_client(fd);
 
   if (req->method == HTTP_GET) {
+    mirror->add_ws_client(fd);
     ESP_LOGI(TAG, "WebSocket client handshake established (fd: %d)", fd);
     return ESP_OK;
   }
@@ -503,7 +524,7 @@ bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload
           fd_set wset;
           FD_ZERO(&wset);
           FD_SET(sockfd, &wset);
-          struct timeval tv = {.tv_sec = 2, .tv_usec = 500000};
+          struct timeval tv = {.tv_sec = 0, .tv_usec = 50000}; // 50ms fast-timeout to protect main loop
           int sel = select(sockfd + 1, nullptr, &wset, nullptr, &tv);
           if (sel > 0) {
             continue;
@@ -629,19 +650,23 @@ void ScreenMirrorComponent::on_lvgl_render_ready() {
 }
 
 bool ScreenMirrorComponent::send_dirty_update() {
+  if (this->jpeg_buffer_ == nullptr)
+    return false;
+
+  {
+    std::lock_guard<std::mutex> ws_lock(this->ws_mutex_);
+    if (this->ws_client_fds_.empty()) {
+      std::lock_guard<std::mutex> dirty_lock(this->dirty_mutex_);
+      this->has_dirty_rect_ = false;
+      return true;
+    }
+  }
+
   int x1 = 0, y1 = 0, x2 = 0, y2 = 0;
   {
     std::lock_guard<std::mutex> lock(this->dirty_mutex_);
     if (!this->has_dirty_rect_)
       return true;
-
-    {
-      std::lock_guard<std::mutex> ws_lock(this->ws_mutex_);
-      if (this->ws_client_fds_.empty()) {
-        this->has_dirty_rect_ = false;
-        return true;
-      }
-    }
 
     x1 = this->dirty_x1_;
     y1 = this->dirty_y1_;
@@ -729,6 +754,9 @@ bool ScreenMirrorComponent::send_dirty_update() {
 }
 
 bool ScreenMirrorComponent::send_full_keyframe(int target_fd) {
+  if (this->jpeg_buffer_ == nullptr)
+    return false;
+
   const uint8_t *raw_buf = nullptr;
   int hw_w = 0, hw_h = 0;
   if (!this->capture_frame_rgb565(raw_buf, hw_w, hw_h) || raw_buf == nullptr)
@@ -808,27 +836,31 @@ void ScreenMirrorComponent::loop() {
   }
 #endif
 
-  // Handle pending LVGL dirty update streaming over WebSocket
-  if (this->has_dirty_rect_) {
-    {
-      std::lock_guard<std::mutex> lock(this->ws_mutex_);
-      if (this->ws_client_fds_.empty()) {
-        std::lock_guard<std::mutex> dirty_lock(this->dirty_mutex_);
-        this->has_dirty_rect_ = false;
+  // Handle pending LVGL dirty update or continuous streaming over WebSocket
+  bool has_clients = false;
+  {
+    std::lock_guard<std::mutex> lock(this->ws_mutex_);
+    has_clients = !this->ws_client_fds_.empty();
+  }
+
+  if (has_clients) {
+    uint32_t now = millis();
+    uint32_t min_interval_ms = (this->fps_ > 0.0f) ? static_cast<uint32_t>(1000.0f / this->fps_) : 66;
+
+    if (!this->gated_streaming_) {
+      if (now - this->last_frame_time_ >= min_interval_ms) {
+        this->last_frame_time_ = now;
+        this->send_full_keyframe(-1);
       }
-    }
-    // Design Decision: Non-Blocking FPS Throttling & Bounding Box Coalescing.
-    // When screen redraws exceed the target FPS, individual dirty rects are unioned/coalesced
-    // in mark_dirty_rect() without blocking this loop or stalling LVGL rendering on the device.
-    // Once min_interval_ms has elapsed, the single aggregated bounding box is transmitted.
-    if (this->has_dirty_rect_) {
-      uint32_t now = millis();
-      uint32_t min_interval_ms = (this->fps_ > 0.0f) ? static_cast<uint32_t>(1000.0f / this->fps_) : 66;
+    } else if (this->has_dirty_rect_) {
       if (now - this->last_frame_time_ >= min_interval_ms) {
         this->last_frame_time_ = now;
         this->send_dirty_update();
       }
     }
+  } else if (this->has_dirty_rect_) {
+    std::lock_guard<std::mutex> dirty_lock(this->dirty_mutex_);
+    this->has_dirty_rect_ = false;
   }
 }
 
@@ -999,6 +1031,11 @@ bool ScreenMirrorComponent::simulate_touch(int x, int y, const std::string &acti
     return false;
   }
 
+  int hw_w = (this->display_ != nullptr) ? this->display_->get_native_width() : 800;
+  int hw_h = (this->display_ != nullptr) ? this->display_->get_native_height() : 480;
+  x = std::max(0, std::min(hw_w - 1, x));
+  y = std::max(0, std::min(hw_h - 1, y));
+
   this->cancel_timeout("min_touch_hold");
 
   if (action == "down") {
@@ -1083,6 +1120,19 @@ bool ScreenMirrorComponent::simulate_swipe(int start_x, int start_y, int end_x, 
   if (this->touchscreen_ == nullptr) {
     ESP_LOGW(TAG, "Cannot simulate swipe: no touchscreen configured");
     return false;
+  }
+
+  int hw_w = (this->display_ != nullptr) ? this->display_->get_native_width() : 800;
+  int hw_h = (this->display_ != nullptr) ? this->display_->get_native_height() : 480;
+  start_x = std::max(0, std::min(hw_w - 1, start_x));
+  start_y = std::max(0, std::min(hw_h - 1, start_y));
+  end_x = std::max(0, std::min(hw_w - 1, end_x));
+  end_y = std::max(0, std::min(hw_h - 1, end_y));
+
+  duration_ms = std::max<uint16_t>(50, duration_ms);
+
+  if (this->active_swipe_.active || this->is_touch_down_) {
+    this->release_touch_();
   }
 
   ESP_LOGD(TAG, "Starting swipe from (%d, %d) to (%d, %d) over %u ms",

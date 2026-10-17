@@ -32,6 +32,7 @@ BYTE_ORDER_OPTIONS = {
 
 CONFIG_SCHEMA = cv.All(
     cv.only_on_esp32,
+    cv.only_with_framework("esp-idf"),
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(ScreenMirrorComponent),
@@ -53,57 +54,35 @@ CONFIG_SCHEMA = cv.All(
 def _final_validate(config):
     import esphome.final_validate as fv
 
-    full = fv.full_config.get()
+    try:
+        full = fv.full_config.get()
+        if CONF_ROTATION not in config:
+            detected_rot = 0
+            if "lvgl" in full:
+                lv = full["lvgl"]
+                if isinstance(lv, list) and len(lv) > 0:
+                    detected_rot = lv[0].get("rotation", 0)
+                elif isinstance(lv, dict):
+                    detected_rot = lv.get("rotation", 0)
+            elif "display" in full:
+                disp = full["display"]
+                if isinstance(disp, list) and len(disp) > 0:
+                    detected_rot = disp[0].get("rotation", 0)
+                elif isinstance(disp, dict):
+                    detected_rot = disp.get("rotation", 0)
+            config[CONF_ROTATION] = display.validate_rotation(detected_rot)
+    except Exception:
+        pass
+    return config
 
-    # Auto-detect rotation if not explicitly specified
-    if CONF_ROTATION not in config:
-        detected_rot = 0
-        if "lvgl" in full:
-            lv = full["lvgl"]
-            if isinstance(lv, list) and len(lv) > 0:
-                detected_rot = lv[0].get("rotation", 0)
-            elif isinstance(lv, dict):
-                detected_rot = lv.get("rotation", 0)
-        elif "display" in full:
-            disp = full["display"]
-            if isinstance(disp, list) and len(disp) > 0:
-                detected_rot = disp[0].get("rotation", 0)
-            elif isinstance(disp, dict):
-                detected_rot = disp.get("rotation", 0)
-        config[CONF_ROTATION] = display.validate_rotation(detected_rot)
+
+FINAL_VALIDATE_SCHEMA = _final_validate
+
 
 def _detect_byte_order(config):
-    # If explicitly configured in screen_mirror schema, honor it
     if CONF_BYTE_ORDER in config:
         return config[CONF_BYTE_ORDER]
 
-    # Search caller frames for the validated Config object
-    import inspect
-    for frame in inspect.stack():
-        for val in frame.frame.f_locals.values():
-            if type(val).__name__ == "Config":
-                if "lvgl" in val:
-                    lv = val["lvgl"]
-                    if isinstance(lv, list) and len(lv) > 0:
-                        bo = lv[0].get("byte_order")
-                        if bo is not None:
-                            return bo == "big_endian"
-                    elif isinstance(lv, dict):
-                        bo = lv.get("byte_order")
-                        if bo is not None:
-                            return bo == "big_endian"
-                if "display" in val:
-                    disp = val["display"]
-                    if isinstance(disp, list) and len(disp) > 0:
-                        bo = disp[0].get("byte_order")
-                        if bo is not None:
-                            return bo == "big_endian"
-                    elif isinstance(disp, dict):
-                        bo = disp.get("byte_order")
-                        if bo is not None:
-                            return bo == "big_endian"
-
-    # Fallback to checking final_validate context
     import esphome.final_validate as fv
     try:
         full = fv.full_config.get()
@@ -134,35 +113,34 @@ def _detect_byte_order(config):
 
 
 def _detect_rotation(config):
-    # If explicitly configured in screen_mirror schema, honor it
     if CONF_ROTATION in config:
         return config[CONF_ROTATION]
 
-    # Search caller frames for the validated Config object
-    import inspect
-    for frame in inspect.stack():
-        for val in frame.frame.f_locals.values():
-            if type(val).__name__ == "Config":
-                if "lvgl" in val:
-                    lv = val["lvgl"]
-                    if isinstance(lv, list) and len(lv) > 0:
-                        rot = lv[0].get("rotation")
-                        if rot is not None:
-                            return display.validate_rotation(rot)
-                    elif isinstance(lv, dict):
-                        rot = lv.get("rotation")
-                        if rot is not None:
-                            return display.validate_rotation(rot)
-                if "display" in val:
-                    disp = val["display"]
-                    if isinstance(disp, list) and len(disp) > 0:
-                        rot = disp[0].get("rotation")
-                        if rot is not None:
-                            return display.validate_rotation(rot)
-                    elif isinstance(disp, dict):
-                        rot = disp.get("rotation")
-                        if rot is not None:
-                            return display.validate_rotation(rot)
+    import esphome.final_validate as fv
+    try:
+        full = fv.full_config.get()
+        if "lvgl" in full:
+            lv = full["lvgl"]
+            if isinstance(lv, list) and len(lv) > 0:
+                rot = lv[0].get("rotation")
+                if rot is not None:
+                    return display.validate_rotation(rot)
+            elif isinstance(lv, dict):
+                rot = lv.get("rotation")
+                if rot is not None:
+                    return display.validate_rotation(rot)
+        if "display" in full:
+            disp = full["display"]
+            if isinstance(disp, list) and len(disp) > 0:
+                rot = disp[0].get("rotation")
+                if rot is not None:
+                    return display.validate_rotation(rot)
+            elif isinstance(disp, dict):
+                rot = disp.get("rotation")
+                if rot is not None:
+                    return display.validate_rotation(rot)
+    except Exception:
+        pass
 
     return 0
 

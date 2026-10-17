@@ -230,6 +230,9 @@
     }
 
     function initWebSocket() {
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        return;
+      }
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${location.host}/ws`;
       try {
@@ -371,7 +374,7 @@
 
     canvas.addEventListener('pointerdown', (e) => {
       e.preventDefault();
-      canvas.setPointerCapture(e.pointerId);
+      try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
       isPointerDown = true;
       pointerMoved = false;
       downSent = false;
