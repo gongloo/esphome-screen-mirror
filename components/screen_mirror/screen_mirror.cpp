@@ -479,7 +479,12 @@ void ScreenMirrorComponent::setup() {
       .handler = ScreenMirrorComponent::ws_handler,
       .user_ctx = this,
       .is_websocket = true,
-      .handle_ws_control_frames = true,
+      // Design Decision: Delegate control frames to esp_http_server.
+      // Setting handle_ws_control_frames = false allows ESP-IDF's httpd server to automatically
+      // answer RFC 6455 PING frames with PONGs and cleanly handle CLOSE handshake frames.
+      // Setting this to true requires the user handler to decode and respond to all control frames,
+      // which previously led to socket desynchronization and premature connection teardown.
+      .handle_ws_control_frames = false,
       .supported_subprotocol = nullptr,
     };
     esp_err_t err = httpd_register_uri_handler(hd, &ws_uri);
@@ -504,8 +509,11 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
 
   int fd = httpd_req_to_sockfd(req);
 
+  // Initial HTTP GET upgrades connection to WebSocket
   if (req->method == HTTP_GET) {
-    mirror->add_ws_client(fd);
+    if (fd >= 0) {
+      mirror->add_ws_client(fd);
+    }
     ESP_LOGI(TAG, "WebSocket client handshake established (fd: %d)", fd);
     return ESP_OK;
   }
@@ -513,7 +521,7 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
   httpd_ws_frame_t ws_pkt;
   memset(&ws_pkt, 0, sizeof(httpd_ws_frame_t));
 
-  // 1. Query frame length and type
+  // 1. Query frame length and type without reading payload yet
   esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, 0);
   if (ret != ESP_OK) {
     ESP_LOGW(TAG, "httpd_ws_recv_frame failed to get frame length: %d", ret);
@@ -524,6 +532,11 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
   if (ws_pkt.type == HTTPD_WS_TYPE_CLOSE) {
     mirror->remove_ws_client(fd);
     return ESP_OK;
+  }
+
+  // Register client only after confirming the socket is healthy and not in a CLOSE handshake
+  if (fd >= 0) {
+    mirror->add_ws_client(fd);
   }
 
   if (ws_pkt.len == 0) {
@@ -669,6 +682,27 @@ void ScreenMirrorComponent::remove_ws_client(int fd) {
       this->release_touch_();
     });
   }
+}
+
+// Design Decision: Orderly socket teardown and httpd session synchronization.
+// When a socket write times out or fails with an unrecoverable error, closing it requires care:
+// 1. Immediately remove from ws_client_fds_ under mutex to halt future streaming attempts.
+// 2. Shut down the read half to abort any pending recv operations.
+// 3. Delegate final socket close and session cleanup to httpd via httpd_sess_trigger_close().
+//    Directly calling close() while httpd still tracks the session can lead to descriptor reuse races.
+void ScreenMirrorComponent::close_dead_socket(int fd) {
+  this->remove_ws_client(fd);
+  shutdown(fd, SHUT_RD);
+#if defined(USE_ESP32) && defined(CONFIG_HTTPD_WS_SUPPORT)
+  if (web_server_base::global_web_server_base != nullptr) {
+    auto *server = web_server_base::global_web_server_base->get_server();
+    if (server != nullptr && server->get_server() != nullptr) {
+      httpd_sess_trigger_close(server->get_server(), fd);
+      return;
+    }
+  }
+#endif
+  close(fd);
 }
 
 void ScreenMirrorComponent::setup_lvgl_hooks() {
@@ -820,7 +854,7 @@ bool ScreenMirrorComponent::send_dirty_update() {
     }
   }
   for (int dead_fd : dead_fds) {
-    this->remove_ws_client(dead_fd);
+    this->close_dead_socket(dead_fd);
   }
 #endif
 
@@ -874,7 +908,7 @@ bool ScreenMirrorComponent::send_full_keyframe(int target_fd) {
     }
   }
   for (int dead_fd : dead_fds) {
-    this->remove_ws_client(dead_fd);
+    this->close_dead_socket(dead_fd);
   }
 #endif
 

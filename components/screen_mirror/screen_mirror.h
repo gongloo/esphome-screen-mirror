@@ -81,6 +81,7 @@ class ScreenMirrorComponent : public Component {
  protected:
   void init_keyframe_encoder_();
   void release_keyframe_encoder_();
+  void close_dead_socket(int fd);
   void release_touch_();
   void simulate_touch_internal_(int x, int y, const std::string &action, int client_id = 0);
   TouchLeaseManager touch_lease_{};
