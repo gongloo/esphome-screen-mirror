@@ -73,34 +73,19 @@ ScreenMirrorComponent::~ScreenMirrorComponent() {
 }
 
 void ScreenMirrorComponent::init_keyframe_encoder_() {
-  std::lock_guard<std::mutex> jpeg_lock(this->jpeg_mutex_);
-  if (this->keyframe_enc_handle_ != nullptr)
-    return;
-
-  size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  if (is_dram_low_for_delta(free_internal, 35 * 1024)) {
-    ESP_LOGW(TAG, "Low internal DRAM (%zu bytes free); skipping session keyframe encoder init", free_internal);
-    return;
-  }
-
-  int w = (this->display_ != nullptr) ? this->display_->get_native_width() : 800;
-  int h = (this->display_ != nullptr) ? this->display_->get_native_height() : 480;
-
-  jpeg_enc_config_t keyframe_cfg = DEFAULT_JPEG_ENC_CONFIG();
-  keyframe_cfg.width = w;
-  keyframe_cfg.height = h;
-  keyframe_cfg.src_type = this->big_endian_ ? JPEG_PIXEL_FORMAT_RGB565_BE : JPEG_PIXEL_FORMAT_RGB565_LE;
-  keyframe_cfg.subsampling = JPEG_SUBSAMPLE_420;
-  keyframe_cfg.quality = this->jpeg_quality_;
-  keyframe_cfg.task_enable = false;
-
-  jpeg_enc_handle_t kf_handle = nullptr;
-  if (jpeg_enc_open(&keyframe_cfg, &kf_handle) == JPEG_ERR_OK && kf_handle != nullptr) {
-    this->keyframe_enc_handle_ = kf_handle;
-    ESP_LOGI(TAG, "Session keyframe JPEG encoder initialized (%dx%d, Q%u)", w, h, this->jpeg_quality_);
-  } else {
-    ESP_LOGW(TAG, "Failed to initialize session keyframe JPEG encoder; will fallback to per-frame open");
-  }
+  // Design Decision: Zero Persistent Encoder State in Internal DRAM.
+  // Hardware JPEG encoding on ESP32-S3 requires allocating an encoder handle in internal DRAM (~30 KB).
+  // On devices running Wi-Fi, lwIP, ESPHome API, web server, and display drivers (such as TouchyVan),
+  // free internal DRAM is typically around 50-60 KB.
+  //
+  // Keeping a persistent 800x480 encoder handle allocated for the duration of a WebSocket session
+  // permanently consumes ~30 KB. When LVGL dirty regions trigger delta tile updates, those tiles
+  // have arbitrary bounding-box dimensions (e.g. 120x40) and cannot reuse the 800x480 encoder handle.
+  // Attempting to open a second encoder for the tile then trips the 35 KB DRAM safety guard, causing
+  // "Skipping encode: low internal DRAM" errors and dropped updates.
+  //
+  // Opening and closing the encoder per frame in encode_jpeg() takes ~1 ms, guarantees that delta tiles
+  // always have full internal DRAM available, and leaves 0 bytes of encoder DRAM pinned between frames.
 }
 
 void ScreenMirrorComponent::release_keyframe_encoder_() {
@@ -108,7 +93,6 @@ void ScreenMirrorComponent::release_keyframe_encoder_() {
   if (this->keyframe_enc_handle_ != nullptr) {
     jpeg_enc_close(static_cast<jpeg_enc_handle_t>(this->keyframe_enc_handle_));
     this->keyframe_enc_handle_ = nullptr;
-    ESP_LOGI(TAG, "Session keyframe JPEG encoder closed; internal DRAM released");
   }
 }
 
