@@ -1,0 +1,83 @@
+import gzip
+import sys
+import unittest
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(REPO_ROOT / "components"))
+
+from esphome.const import KEY_CORE, KEY_TARGET_PLATFORM, KEY_TARGET_FRAMEWORK
+from esphome.core import CORE
+import esphome.final_validate as fv
+import screen_mirror
+
+
+class TestScreenMirrorCodegen(unittest.TestCase):
+    def setUp(self):
+        CORE.data[KEY_CORE] = {
+            KEY_TARGET_PLATFORM: "esp32",
+            KEY_TARGET_FRAMEWORK: "esp-idf",
+        }
+    def test_detect_rotation_explicit(self):
+        config = {"rotation": 180}
+        self.assertEqual(screen_mirror._detect_rotation(config), 180)
+
+    def test_detect_rotation_from_lvgl(self):
+        config = {}
+        fv.full_config.set({"lvgl": [{"rotation": 270}]})
+        self.assertEqual(screen_mirror._detect_rotation(config), 270)
+
+        # Single dict notation
+        fv.full_config.set({"lvgl": {"rotation": 90}})
+        self.assertEqual(screen_mirror._detect_rotation(config), 90)
+
+    def test_detect_rotation_from_display(self):
+        config = {}
+        fv.full_config.set({"display": [{"rotation": 90}]})
+        self.assertEqual(screen_mirror._detect_rotation(config), 90)
+
+    def test_detect_rotation_fallback(self):
+        config = {}
+        fv.full_config.set({})
+        self.assertEqual(screen_mirror._detect_rotation(config), 0)
+
+    def test_detect_byte_order_explicit(self):
+        cfg_be = screen_mirror.CONFIG_SCHEMA({"display": "d", "byte_order": "big_endian"})
+        self.assertEqual(screen_mirror._detect_byte_order(cfg_be), True)
+
+        cfg_le = screen_mirror.CONFIG_SCHEMA({"display": "d", "byte_order": "little_endian"})
+        self.assertEqual(screen_mirror._detect_byte_order(cfg_le), False)
+
+    def test_detect_byte_order_from_lvgl(self):
+        config = {}
+        fv.full_config.set({"lvgl": [{"byte_order": "big_endian"}]})
+        self.assertEqual(screen_mirror._detect_byte_order(config), True)
+
+        fv.full_config.set({"lvgl": [{"byte_order": "little_endian"}]})
+        self.assertEqual(screen_mirror._detect_byte_order(config), False)
+
+    def test_detect_byte_order_from_display(self):
+        config = {}
+        fv.full_config.set({"display": [{"byte_order": "big_endian"}]})
+        self.assertEqual(screen_mirror._detect_byte_order(config), True)
+
+    def test_detect_byte_order_fallback(self):
+        config = {}
+        fv.full_config.set({})
+        self.assertEqual(screen_mirror._detect_byte_order(config), False)
+
+    def test_remote_html_compression(self):
+        html_path = REPO_ROOT / "components" / "screen_mirror" / "remote.html"
+        self.assertTrue(html_path.is_file(), "remote.html must exist")
+
+        html_bytes = html_path.read_bytes()
+        self.assertGreater(len(html_bytes), 1000, "remote.html should have substantial content")
+
+        gz_bytes = gzip.compress(html_bytes, 9)
+        self.assertLess(len(gz_bytes), len(html_bytes), "Gzip compression must reduce size")
+        # Ensure it decompresses losslessly
+        self.assertEqual(gzip.decompress(gz_bytes), html_bytes)
+
+
+if __name__ == "__main__":
+    unittest.main()

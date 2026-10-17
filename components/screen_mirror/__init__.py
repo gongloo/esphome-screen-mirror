@@ -79,7 +79,8 @@ FINAL_VALIDATE_SCHEMA = _final_validate
 
 def _detect_byte_order(config):
     if CONF_BYTE_ORDER in config:
-        return config[CONF_BYTE_ORDER]
+        bo = config[CONF_BYTE_ORDER]
+        return getattr(bo, "enum_value", bo == "big_endian")
 
     import esphome.final_validate as fv
     try:
