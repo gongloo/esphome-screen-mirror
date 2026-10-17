@@ -68,6 +68,8 @@ function createRemoteContext(canvasRect = { left: 0, top: 0, width: 800, height:
     mode: { textContent: '' },
     fps: { textContent: '' },
     fpslabel: { textContent: '' },
+    screenOverlay: { style: {} },
+    banner: { textContent: '' },
   };
 
   class MockWebSocket {
@@ -466,6 +468,55 @@ test('Production remote.html: tab visibility lifecycle (background disconnect, a
   dispatchWinEvent('pagehide');
   assert.equal(resumedWs.readyState, 3 /* CLOSED */, 'pagehide must close active WebSocket');
   assert.equal(sandbox.__getWs(), null, 'ws reference must be null after pagehide');
+});
+
+test('Production remote.html: screen dimming and banner state transitions ("Connecting" vs "Disconnected")', () => {
+  // Verify HTML structure for overlay and banner
+  assert.match(htmlContent, /class=["'][^"']*screen-overlay[^"']*["']/, 'remote.html must contain screen-overlay element');
+  assert.match(htmlContent, /class=["'][^"']*banner[^"']*["']/, 'remote.html must contain banner element');
+  assert.match(htmlContent, /\.screen-overlay\s*\{[^}]*position:\s*absolute;/, 'screen-overlay must be positioned absolutely');
+
+  const { sandbox, elements, mockCanvas, dispatchDocEvent, dispatchWinEvent } = createRemoteContext();
+
+  // 1. Initial state: dim screen with "Connecting" banner over it
+  assert.equal(elements.banner.textContent, 'Connecting', 'Initial banner text must be "Connecting"');
+  assert.equal(elements.screenOverlay.style.display, 'flex', 'Initial overlay must be visible');
+  assert.equal(mockCanvas.style.filter, 'brightness(0.6)', 'Initial screen canvas must be dimmed');
+
+  // 2. Connected state: banner hidden and dimming removed
+  sandbox.initWebSocket();
+  const ws = sandbox.__getWs();
+  assert.ok(ws, 'WebSocket instance must exist');
+  ws.onopen();
+  assert.equal(elements.screenOverlay.style.display, 'none', 'Banner overlay must be hidden when connected');
+  assert.equal(mockCanvas.style.filter, '', 'Screen dimming must be cleared when connected');
+
+  // 3. Intentionally disconnected when backgrounded: dim screen with "Disconnected" banner
+  sandbox.document.visibilityState = 'hidden';
+  dispatchDocEvent('visibilitychange');
+  assert.equal(elements.banner.textContent, 'Disconnected', 'Banner must display "Disconnected" when tab is backgrounded');
+  assert.equal(elements.screenOverlay.style.display, 'flex', 'Banner overlay must be visible when intentionally disconnected');
+  assert.equal(mockCanvas.style.filter, 'brightness(0.6)', 'Screen must be dimmed when backgrounded');
+
+  // 4. Reconnecting when foregrounded: dim screen with "Connecting" banner
+  sandbox.document.visibilityState = 'visible';
+  dispatchDocEvent('visibilitychange');
+  assert.equal(elements.banner.textContent, 'Connecting', 'Banner must display "Connecting" when reconnecting');
+  assert.equal(elements.screenOverlay.style.display, 'flex', 'Banner overlay must be visible when connecting');
+  assert.equal(mockCanvas.style.filter, 'brightness(0.6)', 'Screen must be dimmed when connecting');
+
+  // 5. Reconnected: banner hidden and dimming removed
+  const resumedWs = sandbox.__getWs();
+  assert.ok(resumedWs, 'Resumed WebSocket must exist');
+  resumedWs.onopen();
+  assert.equal(elements.screenOverlay.style.display, 'none', 'Banner overlay must be hidden after reconnecting');
+  assert.equal(mockCanvas.style.filter, '', 'Screen dimming must be cleared after reconnecting');
+
+  // 6. Intentionally disconnected on pagehide / cleanup: dim screen with "Disconnected" banner
+  dispatchWinEvent('pagehide');
+  assert.equal(elements.banner.textContent, 'Disconnected', 'Banner must display "Disconnected" on pagehide cleanup');
+  assert.equal(elements.screenOverlay.style.display, 'flex', 'Banner overlay must be visible on cleanup');
+  assert.equal(mockCanvas.style.filter, 'brightness(0.6)', 'Screen must be dimmed on cleanup');
 });
 
 

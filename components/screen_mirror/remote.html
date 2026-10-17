@@ -41,6 +41,37 @@
       -webkit-touch-callout: none;
       -webkit-user-select: none;
       user-select: none;
+      transition: filter 0.2s ease;
+    }
+    #screenCanvas.dimmed {
+      filter: brightness(0.6);
+    }
+    .screen-overlay {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.65);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10;
+      transition: opacity 0.2s ease;
+      touch-action: none;
+    }
+    .screen-overlay.hidden {
+      display: none;
+    }
+    .banner {
+      background: rgba(15, 25, 41, 0.9);
+      border: 1px solid #334155;
+      color: #f1f5f9;
+      padding: 8px 18px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+      user-select: none;
+      -webkit-user-select: none;
     }
     .ripple {
       position: absolute; width: 28px; height: 28px; background: rgba(56, 189, 248, 0.5);
@@ -76,8 +107,11 @@
     <div class="badge">Mode: <span id="mode" style="color: #10b981">Live Mirror</span></div>
     <div class="badge">Status: <span id="stat" style="color: #10b981">Connected</span></div>
   </div>
-  <div class="screen-container" id="container">
-    <canvas id="screenCanvas"></canvas>
+  <div class="screen-container dimmed" id="container">
+    <canvas id="screenCanvas" class="dimmed" style="filter: brightness(0.6)"></canvas>
+    <div class="screen-overlay" id="screenOverlay">
+      <div class="banner" id="banner">Connecting</div>
+    </div>
   </div>
   <div class="status">Click or tap anywhere on the screen to simulate touch</div>
   <div class="btn-group">
@@ -93,6 +127,39 @@
     const latSpan = document.getElementById('lat');
     const resSpan = document.getElementById('res');
     const rotSpan = document.getElementById('rot');
+    const screenOverlay = document.getElementById('screenOverlay');
+    const banner = document.getElementById('banner');
+
+    function showBanner(text) {
+      if (banner) banner.textContent = text;
+      if (screenOverlay) {
+        screenOverlay.style.display = 'flex';
+        if (screenOverlay.classList) screenOverlay.classList.remove('hidden');
+      }
+      if (canvas) {
+        canvas.style.filter = 'brightness(0.6)';
+        if (canvas.classList) canvas.classList.add('dimmed');
+      }
+      if (container && container.classList) {
+        container.classList.add('dimmed');
+      }
+    }
+
+    function hideBanner() {
+      if (screenOverlay) {
+        screenOverlay.style.display = 'none';
+        if (screenOverlay.classList) screenOverlay.classList.add('hidden');
+      }
+      if (canvas) {
+        canvas.style.filter = '';
+        if (canvas.classList) canvas.classList.remove('dimmed');
+      }
+      if (container && container.classList) {
+        container.classList.remove('dimmed');
+      }
+    }
+
+    showBanner('Connecting');
 
     let isRefreshing = false;
     let rotation = /*%ROTATION%*/ 0;
@@ -155,6 +222,7 @@
             if (metricLbl) metricLbl.textContent = 'Latency';
             latSpan.textContent = `${Math.round(performance.now() - reqTime)} ms`;
             drawRotated(img);
+            hideBanner();
           }
           isRefreshing = false;
           resolve();
@@ -315,6 +383,7 @@
       if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
         return;
       }
+      showBanner('Connecting');
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${location.host}/ws`;
       try {
@@ -322,6 +391,7 @@
         ws.binaryType = 'arraybuffer';
         ws.onopen = () => {
           wsConnected = true;
+          hideBanner();
           const stat = document.getElementById('stat');
           if (stat) stat.textContent = 'WS Connected';
           const mode = document.getElementById('mode');
@@ -340,6 +410,7 @@
           if (document.visibilityState === 'hidden') {
             const stat = document.getElementById('stat');
             if (stat) stat.textContent = 'Paused (Background)';
+            showBanner('Disconnected');
             return;
           }
           const stat = document.getElementById('stat');
@@ -531,9 +602,11 @@
         pendingQueue = [];
         const stat = document.getElementById('stat');
         if (stat) stat.textContent = 'Paused (Background)';
+        showBanner('Disconnected');
       } else {
         const stat = document.getElementById('stat');
         if (stat) stat.textContent = 'Reconnecting...';
+        showBanner('Connecting');
         initWebSocket();
       }
     });
@@ -544,6 +617,7 @@
         try { ws.close(); } catch (e) {}
         ws = null;
       }
+      showBanner('Disconnected');
     };
     window.addEventListener('pagehide', cleanupConnections);
     window.addEventListener('beforeunload', cleanupConnections);
