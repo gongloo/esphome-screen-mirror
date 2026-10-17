@@ -65,7 +65,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: [latest, beta]
+        version: [latest, beta, dev]
         fixture: [test_minimal.yaml, test_full.yaml]
     steps:
       - name: Checkout repository
