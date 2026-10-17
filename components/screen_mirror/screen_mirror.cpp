@@ -614,6 +614,9 @@ bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload
           if (sel > 0) {
             continue;
           }
+          if (sel == 0) {
+            continue; // Slice timed out; loop to re-check cumulative budget
+          }
         }
         elapsed += (millis() - start_time);
         return false;
