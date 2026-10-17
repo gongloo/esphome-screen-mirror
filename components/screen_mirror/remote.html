@@ -108,12 +108,8 @@
     }
     updateInfo();
 
-    function initStream() {
-      startContinuousPolling();
-    }
-
     let lastRenderedTime = 0;
-    let pollingActive = true;
+    let pollingActive = false;
 
     function refreshScreen(manual = false) {
       if (manual && wsConnected && ws && ws.readyState === WebSocket.OPEN) {
@@ -278,6 +274,15 @@
         let isDecoding = false;
         let pendingQueue = [];
         const MAX_PENDING = 2;
+        let lastKeyframeRecovery = 0;
+
+        function requestKeyframeRecovery() {
+          const now = performance.now();
+          if (wsConnected && ws && ws.readyState === WebSocket.OPEN && (now - lastKeyframeRecovery > 1000)) {
+            lastKeyframeRecovery = now;
+            ws.send('K');
+          }
+        }
 
         const renderTile = (imgSource, magic, x, y, w, h) => {
           if (magic === 0x46 && w > 0 && h > 0) {
@@ -308,12 +313,15 @@
                   };
                   img.onerror = () => {
                     URL.revokeObjectURL(img.src);
+                    requestKeyframeRecovery();
                     resolve();
                   };
                   img.src = URL.createObjectURL(frame.blob);
                 });
               }
-            } catch (e) {}
+            } catch (e) {
+              requestKeyframeRecovery();
+            }
           }
           isDecoding = false;
         }
@@ -475,7 +483,13 @@
     canvas.addEventListener('pointercancel', handlePointerUp);
 
     initWebSocket();
-    initStream();
+    // Fallback: If WebSocket does not connect within 3.5s, activate HTTP snapshot polling
+    setTimeout(() => {
+      if (!wsConnected && !pollingActive) {
+        pollingActive = true;
+        startContinuousPolling();
+      }
+    }, 3500);
   </script>
 </body>
 </html>
