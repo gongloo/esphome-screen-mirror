@@ -10,6 +10,16 @@ inline uint16_t swap_rgb565(uint16_t v) {
   return static_cast<uint16_t>((v >> 8) | (v << 8));
 }
 
+inline void swap_rgb565_buffer(const uint8_t *src, uint8_t *dst, size_t num_bytes) {
+  if (src == nullptr || dst == nullptr) return;
+  for (size_t i = 0; i + 1 < num_bytes; i += 2) {
+    uint8_t b0 = src[i];
+    uint8_t b1 = src[i + 1];
+    dst[i] = b1;
+    dst[i + 1] = b0;
+  }
+}
+
 inline bool build_bmp_header(int width, int height, uint8_t *header_66) {
   if (header_66 == nullptr) return false;
 

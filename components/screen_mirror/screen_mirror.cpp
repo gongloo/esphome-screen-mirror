@@ -227,10 +227,7 @@ void ScreenMirrorComponent::setup() {
           size_t to_send = std::min(chunk_size, image_bytes - offset);
           const char *send_ptr = nullptr;
           if (this->parent_->big_endian_) {
-            for (size_t i = 0; i < to_send; i += 2) {
-              swap_chunk[i] = buffer[offset + i + 1];
-              swap_chunk[i + 1] = buffer[offset + i];
-            }
+            swap_rgb565_buffer(buffer + offset, swap_chunk, to_send);
             send_ptr = reinterpret_cast<const char *>(swap_chunk);
           } else {
             send_ptr = reinterpret_cast<const char *>(buffer + offset);
@@ -751,13 +748,8 @@ bool ScreenMirrorComponent::send_dirty_update() {
   }
 
   const uint8_t *pixel_src = nullptr;
-  size_t needed_scratch = w * h * 2;
-  if (needed_scratch <= this->tile_scratch_size_ && this->tile_scratch_ != nullptr) {
-    for (int r = 0; r < h; r++) {
-      const uint8_t *src_row = raw_buf + ((y1 + r) * hw_w + x1) * 2;
-      uint8_t *dst_row = this->tile_scratch_ + (r * w) * 2;
-      std::memcpy(dst_row, src_row, w * 2);
-    }
+  if (DirtyAreaTracker::extract_tile_rgb565(raw_buf, hw_w, hw_h, x1, y1, w, h,
+                                           this->tile_scratch_, this->tile_scratch_size_)) {
     pixel_src = this->tile_scratch_;
   } else {
     return this->send_full_keyframe(-1);

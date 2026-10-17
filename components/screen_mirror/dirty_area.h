@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 
 namespace esphome {
 namespace screen_mirror {
@@ -56,6 +57,24 @@ class DirtyAreaTracker {
     int64_t tile_area = static_cast<int64_t>(w) * h;
     int64_t screen_area = static_cast<int64_t>(hw_w) * hw_h;
     return (tile_area * 100) >= (screen_area * threshold_percent);
+  }
+
+  // Extracts a 2D sub-rectangle of 16-bit RGB565 pixels into a contiguous destination buffer
+  static bool extract_tile_rgb565(const uint8_t *raw_buf, int hw_w, int hw_h,
+                                  int x1, int y1, int w, int h,
+                                  uint8_t *tile_scratch, size_t tile_scratch_size) {
+    if (raw_buf == nullptr || tile_scratch == nullptr) return false;
+    if (w <= 0 || h <= 0 || hw_w <= 0 || hw_h <= 0) return false;
+    if (x1 < 0 || y1 < 0 || x1 + w > hw_w || y1 + h > hw_h) return false;
+    size_t needed = static_cast<size_t>(w) * h * 2;
+    if (needed > tile_scratch_size) return false;
+
+    for (int r = 0; r < h; r++) {
+      const uint8_t *src_row = raw_buf + ((y1 + r) * hw_w + x1) * 2;
+      uint8_t *dst_row = tile_scratch + (r * w) * 2;
+      std::memcpy(dst_row, src_row, w * 2);
+    }
+    return true;
   }
 
  private:

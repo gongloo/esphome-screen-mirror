@@ -212,6 +212,10 @@
     let ws = null;
     let wsConnected = false;
     let frameTimes = [];
+    let isDecoding = false;
+    let pendingQueue = [];
+    const MAX_PENDING = 2;
+    let lastKeyframeRecovery = -1000;
 
     function updateFpsCounter() {
       const now = performance.now();
@@ -223,6 +227,56 @@
       if (latSpan) {
         latSpan.textContent = `${frameTimes.length} fps`;
       }
+    }
+
+    function requestKeyframeRecovery() {
+      const now = performance.now();
+      if (wsConnected && ws && ws.readyState === WebSocket.OPEN && (now - lastKeyframeRecovery > 1000)) {
+        lastKeyframeRecovery = now;
+        ws.send('K');
+      }
+    }
+
+    const renderTile = (imgSource, magic, x, y, w, h) => {
+      if (magic === 0x46 && w > 0 && h > 0) {
+        hwWidth = w;
+        hwHeight = h;
+      }
+      drawTile(imgSource, x, y, w, h);
+      updateFpsCounter();
+    };
+
+    async function processQueue() {
+      if (isDecoding) return;
+      isDecoding = true;
+      while (pendingQueue.length > 0) {
+        const frame = pendingQueue.shift();
+        try {
+          if (window.createImageBitmap) {
+            const bmp = await createImageBitmap(frame.blob);
+            renderTile(bmp, frame.magic, frame.x, frame.y, frame.w, frame.h);
+            bmp.close();
+          } else {
+            await new Promise((resolve) => {
+              const img = new Image();
+              img.onload = () => {
+                renderTile(img, frame.magic, frame.x, frame.y, frame.w, frame.h);
+                URL.revokeObjectURL(img.src);
+                resolve();
+              };
+              img.onerror = () => {
+                URL.revokeObjectURL(img.src);
+                requestKeyframeRecovery();
+                resolve();
+              };
+              img.src = URL.createObjectURL(frame.blob);
+            });
+          }
+        } catch (e) {
+          requestKeyframeRecovery();
+        }
+      }
+      isDecoding = false;
     }
 
     function initWebSocket() {
@@ -270,61 +324,6 @@
           isDecoding = false;
           ws.close();
         };
-
-        let isDecoding = false;
-        let pendingQueue = [];
-        const MAX_PENDING = 2;
-        let lastKeyframeRecovery = -1000;
-
-        function requestKeyframeRecovery() {
-          const now = performance.now();
-          if (wsConnected && ws && ws.readyState === WebSocket.OPEN && (now - lastKeyframeRecovery > 1000)) {
-            lastKeyframeRecovery = now;
-            ws.send('K');
-          }
-        }
-
-        const renderTile = (imgSource, magic, x, y, w, h) => {
-          if (magic === 0x46 && w > 0 && h > 0) {
-            hwWidth = w;
-            hwHeight = h;
-          }
-          drawTile(imgSource, x, y, w, h);
-          updateFpsCounter();
-        };
-
-        async function processQueue() {
-          if (isDecoding) return;
-          isDecoding = true;
-          while (pendingQueue.length > 0) {
-            const frame = pendingQueue.shift();
-            try {
-              if (window.createImageBitmap) {
-                const bmp = await createImageBitmap(frame.blob);
-                renderTile(bmp, frame.magic, frame.x, frame.y, frame.w, frame.h);
-                bmp.close();
-              } else {
-                await new Promise((resolve) => {
-                  const img = new Image();
-                  img.onload = () => {
-                    renderTile(img, frame.magic, frame.x, frame.y, frame.w, frame.h);
-                    URL.revokeObjectURL(img.src);
-                    resolve();
-                  };
-                  img.onerror = () => {
-                    URL.revokeObjectURL(img.src);
-                    requestKeyframeRecovery();
-                    resolve();
-                  };
-                  img.src = URL.createObjectURL(frame.blob);
-                });
-              }
-            } catch (e) {
-              requestKeyframeRecovery();
-            }
-          }
-          isDecoding = false;
-        }
 
         ws.onmessage = (event) => {
           if (typeof event.data === 'string') return;
