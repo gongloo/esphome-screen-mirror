@@ -812,6 +812,8 @@ bool ScreenMirrorComponent::send_dirty_update() {
   }
   for (int dead_fd : dead_fds) {
     this->remove_ws_client(dead_fd);
+    shutdown(dead_fd, SHUT_RD);
+    close(dead_fd);
   }
 #endif
 
@@ -865,6 +867,8 @@ bool ScreenMirrorComponent::send_full_keyframe(int target_fd) {
   }
   for (int dead_fd : dead_fds) {
     this->remove_ws_client(dead_fd);
+    shutdown(dead_fd, SHUT_RD);
+    close(dead_fd);
   }
 #endif
 
