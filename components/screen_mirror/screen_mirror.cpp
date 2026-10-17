@@ -125,9 +125,19 @@ void ScreenMirrorComponent::setup() {
     ESP_LOGW(TAG, "Failed to allocate HTTP snapshot JPEG buffer in PSRAM");
   }
 
-  // Allocate tile scratch buffer in PSRAM for extracting dirty sub-rectangles (512 KB in PSRAM, fallback to 128 KB)
-  this->tile_scratch_size_ = 512 * 1024;
+  // Allocate tile scratch buffer in PSRAM for extracting dirty sub-rectangles.
+  // Full-frame RGB565 sizing (width * height * 2, e.g. 768 KB for 800x480) ensures that any dirty
+  // bounding box up to the 90% keyframe escalation threshold can be extracted into contiguous memory
+  // without truncation. If contiguous PSRAM is fragmented, fall back gracefully to 512 KB or 128 KB.
+  size_t full_frame_raw = (this->display_ != nullptr)
+      ? static_cast<size_t>(this->display_->get_native_width()) * this->display_->get_native_height() * 2
+      : (800 * 480 * 2);
+  this->tile_scratch_size_ = (full_frame_raw > 0) ? full_frame_raw : (768 * 1024);
   this->tile_scratch_ = (uint8_t *) heap_caps_malloc(this->tile_scratch_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (this->tile_scratch_ == nullptr) {
+    this->tile_scratch_size_ = 512 * 1024;
+    this->tile_scratch_ = (uint8_t *) heap_caps_malloc(this->tile_scratch_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  }
   if (this->tile_scratch_ == nullptr) {
     this->tile_scratch_size_ = 128 * 1024;
     this->tile_scratch_ = (uint8_t *) heap_caps_malloc(this->tile_scratch_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -787,11 +797,9 @@ bool ScreenMirrorComponent::send_dirty_update() {
   if (y1 + h > hw_h) h = hw_h - y1;
 
   // Design Decision: Automatic Keyframe Escalation.
-  // If the accumulated dirty bounding box covers >= 60% of the display area (e.g. full-screen
-  // page navigation or complex animations), escalate to sending a full keyframe rather than
-  // extracting and streaming a large partial tile. This prevents visual tearing and reduces
-  // tile extraction CPU overhead.
-  if (DirtyAreaTracker::should_escalate_to_keyframe(w, h, hw_w, hw_h, 60)) {
+  // If the accumulated dirty bounding box covers >= 90% of the display area (full screen transition),
+  // escalate to sending a full keyframe rather than extracting and streaming a large partial tile.
+  if (DirtyAreaTracker::should_escalate_to_keyframe(w, h, hw_w, hw_h, 90)) {
     return this->send_full_keyframe(-1);
   }
 
