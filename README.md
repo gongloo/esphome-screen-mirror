@@ -1,6 +1,7 @@
 # ESPHome Screen Mirror (`screen_mirror`)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Latest Release](https://img.shields.io/github/v/release/gongloo/esphome-screen-mirror?color=blue)](https://github.com/gongloo/esphome-screen-mirror/releases)
 [![ESPHome External Component](https://img.shields.io/badge/ESPHome-External%20Component-orange.svg)](https://esphome.io)
 [![CI](https://github.com/gongloo/esphome-screen-mirror/actions/workflows/ci.yml/badge.svg)](https://github.com/gongloo/esphome-screen-mirror/actions/workflows/ci.yml)
 
