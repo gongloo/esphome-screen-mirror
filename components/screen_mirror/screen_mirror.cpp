@@ -542,9 +542,18 @@ bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload
     hdr_len = 10;
   }
 
-  auto send_all = [](int sockfd, const uint8_t *data, size_t total) -> bool {
+  uint32_t elapsed_ms = 0;
+  const uint32_t max_budget_ms = 15; // 15ms hard transmission budget to protect loopTask
+
+  auto send_all = [](int sockfd, const uint8_t *data, size_t total, uint32_t max_budget, uint32_t &elapsed) -> bool {
     size_t sent = 0;
+    uint32_t start_time = millis();
     while (sent < total) {
+      uint32_t current_elapsed = (millis() - start_time) + elapsed;
+      if (current_elapsed >= max_budget) {
+        elapsed = current_elapsed;
+        return false; // Exceeded transmission budget for this client
+      }
       ssize_t ret = send(sockfd, reinterpret_cast<const char *>(data + sent), total - sent, MSG_DONTWAIT);
       if (ret > 0) {
         sent += ret;
@@ -552,25 +561,37 @@ bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload
       }
       if (ret < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
+          uint32_t now = millis();
+          current_elapsed = (now - start_time) + elapsed;
+          if (current_elapsed >= max_budget) {
+            elapsed = current_elapsed;
+            return false;
+          }
+          uint32_t remaining_ms = max_budget - current_elapsed;
+          uint32_t wait_us = std::min<uint32_t>(remaining_ms * 1000, 10000); // at most 10ms select wait
+
           fd_set wset;
           FD_ZERO(&wset);
           FD_SET(sockfd, &wset);
-          struct timeval tv = {.tv_sec = 0, .tv_usec = 50000}; // 50ms fast-timeout to protect main loop
+          struct timeval tv = {.tv_sec = 0, .tv_usec = static_cast<suseconds_t>(wait_us)};
           int sel = select(sockfd + 1, nullptr, &wset, nullptr, &tv);
           if (sel > 0) {
             continue;
           }
         }
+        elapsed += (millis() - start_time);
         return false;
       }
+      elapsed += (millis() - start_time);
       return false; // ret == 0 (closed)
     }
+    elapsed += (millis() - start_time);
     return true;
   };
 
-  if (!send_all(fd, ws_hdr, hdr_len))
+  if (!send_all(fd, ws_hdr, hdr_len, max_budget_ms, elapsed_ms))
     return false;
-  return send_all(fd, payload, len);
+  return send_all(fd, payload, len, max_budget_ms, elapsed_ms);
 }
 
 void ScreenMirrorComponent::add_ws_client(int fd) {
