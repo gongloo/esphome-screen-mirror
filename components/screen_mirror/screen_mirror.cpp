@@ -1,5 +1,6 @@
 #include "screen_mirror.h"
 #include "esphome/core/log.h"
+#include "esphome/core/application.h"
 #include <cstring>
 #include <algorithm>
 #include <sys/socket.h>
@@ -72,34 +73,19 @@ ScreenMirrorComponent::~ScreenMirrorComponent() {
 }
 
 void ScreenMirrorComponent::init_keyframe_encoder_() {
-  std::lock_guard<std::mutex> jpeg_lock(this->jpeg_mutex_);
-  if (this->keyframe_enc_handle_ != nullptr)
-    return;
-
-  size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  if (is_dram_low_for_delta(free_internal, 35 * 1024)) {
-    ESP_LOGW(TAG, "Low internal DRAM (%zu bytes free); skipping session keyframe encoder init", free_internal);
-    return;
-  }
-
-  int w = (this->display_ != nullptr) ? this->display_->get_native_width() : 800;
-  int h = (this->display_ != nullptr) ? this->display_->get_native_height() : 480;
-
-  jpeg_enc_config_t keyframe_cfg = DEFAULT_JPEG_ENC_CONFIG();
-  keyframe_cfg.width = w;
-  keyframe_cfg.height = h;
-  keyframe_cfg.src_type = this->big_endian_ ? JPEG_PIXEL_FORMAT_RGB565_BE : JPEG_PIXEL_FORMAT_RGB565_LE;
-  keyframe_cfg.subsampling = JPEG_SUBSAMPLE_420;
-  keyframe_cfg.quality = this->jpeg_quality_;
-  keyframe_cfg.task_enable = false;
-
-  jpeg_enc_handle_t kf_handle = nullptr;
-  if (jpeg_enc_open(&keyframe_cfg, &kf_handle) == JPEG_ERR_OK && kf_handle != nullptr) {
-    this->keyframe_enc_handle_ = kf_handle;
-    ESP_LOGI(TAG, "Session keyframe JPEG encoder initialized (%dx%d, Q%u)", w, h, this->jpeg_quality_);
-  } else {
-    ESP_LOGW(TAG, "Failed to initialize session keyframe JPEG encoder; will fallback to per-frame open");
-  }
+  // Design Decision: Zero Persistent Encoder State in Internal DRAM.
+  // Hardware JPEG encoding on ESP32-S3 requires allocating an encoder handle in internal DRAM (~30 KB).
+  // On devices running Wi-Fi, lwIP, ESPHome API, web server, and display drivers (such as TouchyVan),
+  // free internal DRAM is typically around 50-60 KB.
+  //
+  // Keeping a persistent 800x480 encoder handle allocated for the duration of a WebSocket session
+  // permanently consumes ~30 KB. When LVGL dirty regions trigger delta tile updates, those tiles
+  // have arbitrary bounding-box dimensions (e.g. 120x40) and cannot reuse the 800x480 encoder handle.
+  // Attempting to open a second encoder for the tile then trips the 35 KB DRAM safety guard, causing
+  // "Skipping encode: low internal DRAM" errors and dropped updates.
+  //
+  // Opening and closing the encoder per frame in encode_jpeg() takes ~1 ms, guarantees that delta tiles
+  // always have full internal DRAM available, and leaves 0 bytes of encoder DRAM pinned between frames.
 }
 
 void ScreenMirrorComponent::release_keyframe_encoder_() {
@@ -107,7 +93,6 @@ void ScreenMirrorComponent::release_keyframe_encoder_() {
   if (this->keyframe_enc_handle_ != nullptr) {
     jpeg_enc_close(static_cast<jpeg_enc_handle_t>(this->keyframe_enc_handle_));
     this->keyframe_enc_handle_ = nullptr;
-    ESP_LOGI(TAG, "Session keyframe JPEG encoder closed; internal DRAM released");
   }
 }
 
@@ -140,9 +125,19 @@ void ScreenMirrorComponent::setup() {
     ESP_LOGW(TAG, "Failed to allocate HTTP snapshot JPEG buffer in PSRAM");
   }
 
-  // Allocate tile scratch buffer in PSRAM for extracting dirty sub-rectangles (512 KB in PSRAM, fallback to 128 KB)
-  this->tile_scratch_size_ = 512 * 1024;
+  // Allocate tile scratch buffer in PSRAM for extracting dirty sub-rectangles.
+  // Full-frame RGB565 sizing (width * height * 2, e.g. 768 KB for 800x480) ensures that any dirty
+  // bounding box up to the 90% keyframe escalation threshold can be extracted into contiguous memory
+  // without truncation. If contiguous PSRAM is fragmented, fall back gracefully to 512 KB or 128 KB.
+  size_t full_frame_raw = (this->display_ != nullptr)
+      ? static_cast<size_t>(this->display_->get_native_width()) * this->display_->get_native_height() * 2
+      : (800 * 480 * 2);
+  this->tile_scratch_size_ = (full_frame_raw > 0) ? full_frame_raw : (768 * 1024);
   this->tile_scratch_ = (uint8_t *) heap_caps_malloc(this->tile_scratch_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (this->tile_scratch_ == nullptr) {
+    this->tile_scratch_size_ = 512 * 1024;
+    this->tile_scratch_ = (uint8_t *) heap_caps_malloc(this->tile_scratch_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  }
   if (this->tile_scratch_ == nullptr) {
     this->tile_scratch_size_ = 128 * 1024;
     this->tile_scratch_ = (uint8_t *) heap_caps_malloc(this->tile_scratch_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -478,7 +473,12 @@ void ScreenMirrorComponent::setup() {
       .handler = ScreenMirrorComponent::ws_handler,
       .user_ctx = this,
       .is_websocket = true,
-      .handle_ws_control_frames = true,
+      // Design Decision: Delegate control frames to esp_http_server.
+      // Setting handle_ws_control_frames = false allows ESP-IDF's httpd server to automatically
+      // answer RFC 6455 PING frames with PONGs and cleanly handle CLOSE handshake frames.
+      // Setting this to true requires the user handler to decode and respond to all control frames,
+      // which previously led to socket desynchronization and premature connection teardown.
+      .handle_ws_control_frames = false,
       .supported_subprotocol = nullptr,
     };
     esp_err_t err = httpd_register_uri_handler(hd, &ws_uri);
@@ -503,8 +503,11 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
 
   int fd = httpd_req_to_sockfd(req);
 
+  // Initial HTTP GET upgrades connection to WebSocket
   if (req->method == HTTP_GET) {
-    mirror->add_ws_client(fd);
+    if (fd >= 0) {
+      mirror->add_ws_client(fd);
+    }
     ESP_LOGI(TAG, "WebSocket client handshake established (fd: %d)", fd);
     return ESP_OK;
   }
@@ -512,7 +515,7 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
   httpd_ws_frame_t ws_pkt;
   memset(&ws_pkt, 0, sizeof(httpd_ws_frame_t));
 
-  // 1. Query frame length and type
+  // 1. Query frame length and type without reading payload yet
   esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, 0);
   if (ret != ESP_OK) {
     ESP_LOGW(TAG, "httpd_ws_recv_frame failed to get frame length: %d", ret);
@@ -523,6 +526,11 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
   if (ws_pkt.type == HTTPD_WS_TYPE_CLOSE) {
     mirror->remove_ws_client(fd);
     return ESP_OK;
+  }
+
+  // Register client only after confirming the socket is healthy and not in a CLOSE handshake
+  if (fd >= 0) {
+    mirror->add_ws_client(fd);
   }
 
   if (ws_pkt.len == 0) {
@@ -548,7 +556,12 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
   auto cmd = parse_ws_packet(buf, ws_pkt.len);
   switch (cmd.type) {
     case WsCmdType::KEYFRAME:
-      mirror->send_full_keyframe(fd);
+      // Coalesce rapid keyframe requests using named defer ("ws_keyframe").
+      // If a client or multiple network packets request keyframes before loopTask can service them,
+      // earlier unexecuted keyframe items are replaced so only one full frame is encoded and sent.
+      mirror->defer("ws_keyframe", [mirror, fd]() {
+        mirror->send_full_keyframe(fd);
+      });
       break;
     case WsCmdType::TAP:
       mirror->simulate_tap(cmd.x, cmd.y, cmd.duration, fd);
@@ -581,10 +594,16 @@ bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload
 
   uint32_t elapsed_ms = 0;
 
+  // Design Decision: Non-blocking unthrottled streaming with cooperative WDT feeding and select wait.
+  // We use MSG_DONTWAIT to push packets directly to lwIP network buffers as fast as Wi-Fi accepts them.
+  // If socket buffers fill (EAGAIN/EWOULDBLOCK), select() waits on the socket write descriptor up to the
+  // client's time budget. We deliberately avoid artificial sleep/delay calls between successful sends,
+  // preventing frame transmission from ballooning into hundreds of milliseconds.
   auto send_all = [](int sockfd, const uint8_t *data, size_t total, uint32_t max_budget, uint32_t &elapsed) -> bool {
     size_t sent = 0;
     uint32_t start_time = millis();
     while (sent < total) {
+      App.feed_wdt();
       uint32_t current_elapsed = (millis() - start_time) + elapsed;
       if (current_elapsed >= max_budget) {
         elapsed = current_elapsed;
@@ -664,11 +683,35 @@ void ScreenMirrorComponent::remove_ws_client(int fd) {
   }
 }
 
+// Design Decision: Orderly socket teardown and httpd session synchronization.
+// When a socket write times out or fails with an unrecoverable error, closing it requires care:
+// 1. Immediately remove from ws_client_fds_ under mutex to halt future streaming attempts.
+// 2. Shut down the read half to abort any pending recv operations.
+// 3. Delegate final socket close and session cleanup to httpd via httpd_sess_trigger_close().
+//    Directly calling close() while httpd still tracks the session can lead to descriptor reuse races.
+void ScreenMirrorComponent::close_dead_socket(int fd) {
+  this->remove_ws_client(fd);
+  shutdown(fd, SHUT_RD);
+#if defined(USE_ESP32) && defined(CONFIG_HTTPD_WS_SUPPORT)
+  if (web_server_base::global_web_server_base != nullptr) {
+    auto *server = web_server_base::global_web_server_base->get_server();
+    if (server != nullptr && server->get_server() != nullptr) {
+      httpd_sess_trigger_close(server->get_server(), fd);
+      return;
+    }
+  }
+#endif
+  close(fd);
+}
+
+// Design Decision: Lazy hook registration for LVGL displays.
+// The default LVGL display (lv_display_get_default()) may not be registered yet during setup()
+// due to component initialization order. We log at DEBUG level and retry in loop() until hooked.
 void ScreenMirrorComponent::setup_lvgl_hooks() {
 #if defined(HAS_LVGL)
   lv_display_t *disp = lv_display_get_default();
   if (disp == nullptr) {
-    ESP_LOGW(TAG, "No default LVGL display found; delta region streaming unavailable");
+    ESP_LOGD(TAG, "No default LVGL display found yet; waiting for display");
     return;
   }
 
@@ -762,11 +805,9 @@ bool ScreenMirrorComponent::send_dirty_update() {
   if (y1 + h > hw_h) h = hw_h - y1;
 
   // Design Decision: Automatic Keyframe Escalation.
-  // If the accumulated dirty bounding box covers >= 60% of the display area (e.g. full-screen
-  // page navigation or complex animations), escalate to sending a full keyframe rather than
-  // extracting and streaming a large partial tile. This prevents visual tearing and reduces
-  // tile extraction CPU overhead.
-  if (DirtyAreaTracker::should_escalate_to_keyframe(w, h, hw_w, hw_h, 60)) {
+  // If the accumulated dirty bounding box covers >= 90% of the display area (full screen transition),
+  // escalate to sending a full keyframe rather than extracting and streaming a large partial tile.
+  if (DirtyAreaTracker::should_escalate_to_keyframe(w, h, hw_w, hw_h, 90)) {
     return this->send_full_keyframe(-1);
   }
 
@@ -780,6 +821,13 @@ bool ScreenMirrorComponent::send_dirty_update() {
 
   size_t total_payload_len = 0;
   {
+    // Critical: jpeg_mutex_ is scoped ONLY to JPEG hardware encoding.
+    // DEADLOCK FIX / TASK WDT: Previously, an encode_jpeg failure called send_full_keyframe(-1)
+    // while holding this->jpeg_mutex_. Because send_full_keyframe also acquires jpeg_mutex_
+    // on the same thread, it caused an immediate self-deadlock on loopTask, causing FreeRTOS
+    // Task Watchdog (TWDT) to trigger after 5 seconds.
+    // If delta encoding fails (e.g. temporary low DRAM), return false safely without escalating
+    // under lock. The client can request a keyframe or subsequent frames will resume naturally.
     std::lock_guard<std::mutex> jpeg_lock(this->jpeg_mutex_);
 
     // Encode JPEG into jpeg_buffer_ + 10 (leaving 10 bytes for binary header)
@@ -798,22 +846,23 @@ bool ScreenMirrorComponent::send_dirty_update() {
   }
 
 #if defined(USE_ESP32) && defined(CONFIG_HTTPD_WS_SUPPORT)
+  // Transmission happens outside jpeg_mutex_ so slow Wi-Fi clients never block HTTP snapshots or loopTask
   std::vector<int> clients;
   {
     std::lock_guard<std::mutex> lock(this->ws_mutex_);
     clients = this->ws_client_fds_;
   }
 
+  // Generous transmission budget: dynamic based on packet length (payload / 40 + 500 ms) with a 2000 ms floor
+  uint32_t delta_budget = std::max<uint32_t>(2000, total_payload_len / 40 + 500);
   std::vector<int> dead_fds;
   for (int fd : clients) {
-    if (!this->send_ws_binary_packet(fd, this->jpeg_buffer_, total_payload_len)) {
+    if (!this->send_ws_binary_packet(fd, this->jpeg_buffer_, total_payload_len, delta_budget)) {
       dead_fds.push_back(fd);
     }
   }
   for (int dead_fd : dead_fds) {
-    this->remove_ws_client(dead_fd);
-    shutdown(dead_fd, SHUT_RD);
-    close(dead_fd);
+    this->close_dead_socket(dead_fd);
   }
 #endif
 
@@ -848,9 +897,10 @@ bool ScreenMirrorComponent::send_full_keyframe(int target_fd) {
   }
 
 #if defined(USE_ESP32) && defined(CONFIG_HTTPD_WS_SUPPORT)
+  uint32_t keyframe_budget = std::max<uint32_t>(2500, total_payload_len / 40 + 500);
   std::vector<int> dead_fds;
   if (target_fd >= 0) {
-    if (!this->send_ws_binary_packet(target_fd, this->jpeg_buffer_, total_payload_len)) {
+    if (!this->send_ws_binary_packet(target_fd, this->jpeg_buffer_, total_payload_len, keyframe_budget)) {
       dead_fds.push_back(target_fd);
     }
   } else {
@@ -860,15 +910,13 @@ bool ScreenMirrorComponent::send_full_keyframe(int target_fd) {
       clients = this->ws_client_fds_;
     }
     for (int fd : clients) {
-      if (!this->send_ws_binary_packet(fd, this->jpeg_buffer_, total_payload_len)) {
+      if (!this->send_ws_binary_packet(fd, this->jpeg_buffer_, total_payload_len, keyframe_budget)) {
         dead_fds.push_back(fd);
       }
     }
   }
   for (int dead_fd : dead_fds) {
-    this->remove_ws_client(dead_fd);
-    shutdown(dead_fd, SHUT_RD);
-    close(dead_fd);
+    this->close_dead_socket(dead_fd);
   }
 #endif
 
@@ -891,6 +939,12 @@ void ScreenMirrorComponent::loop() {
         this->simulate_touch_internal_(step_out.x, step_out.y, "move", client_id);
       }
     }
+  }
+#endif
+
+#if defined(HAS_LVGL)
+  if (!this->lvgl_hooked_) {
+    this->setup_lvgl_hooks();
   }
 #endif
 
@@ -1029,6 +1083,10 @@ bool ScreenMirrorComponent::build_bmp_header(int width, int height, uint8_t *hea
 
 void ScreenMirrorComponent::release_touch_() {
 #ifdef USE_TOUCHSCREEN
+  // Discard any pending move events queued in the scheduler so stale movement
+  // doesn't execute after the touch has ended.
+  this->cancel_defer("touch_move");
+  this->cancel_timeout("touch_move");
   this->cancel_timeout("min_touch_hold");
   this->cancel_timeout("release_tap");
   this->touch_lease_.record_up();
@@ -1086,10 +1144,27 @@ bool ScreenMirrorComponent::simulate_touch(int x, int y, const std::string &acti
   int hw_h = (this->display_ != nullptr) ? this->display_->get_native_height() : 480;
   clamp_coordinates(x, y, hw_w, hw_h);
 
-  // Marshal execution to main loop task for LVGL and ESPHome thread safety
-  this->defer([this, x, y, action, client_id]() {
-    this->simulate_touch_internal_(x, y, action, client_id);
-  });
+  // Marshal execution to main loop task for LVGL and ESPHome thread safety.
+  //
+  // Design Decision: Named Defer for Continuous Events vs. Anonymous Defer for Discrete Events.
+  // In ESPHome's Scheduler:
+  // - Anonymous defer (defer(fn)): static_name is nullptr, so cancellation is skipped. Every single
+  //   call appends a new lambda to defer_queue_. If client drag events arrive at 50-60 Hz while loopTask
+  //   is busy encoding/transmitting a frame, dozens of lambdas pile up, causing severe UI lag and buffer churn.
+  // - Named defer (defer("name", fn)): static_name is non-null. The scheduler automatically cancels any
+  //   unexecuted item with the same name before queueing the new one. Thus, continuous "move" events
+  //   automatically coalesce to the latest coordinate per loop tick!
+  // - Discrete state transitions ("down" and "up") must NEVER be coalesced or cancelled, so they use
+  //   anonymous defer to guarantee every press and release is processed in exact order.
+  if (action == "move") {
+    this->defer("touch_move", [this, x, y, client_id]() {
+      this->simulate_touch_internal_(x, y, "move", client_id);
+    });
+  } else {
+    this->defer([this, x, y, action, client_id]() {
+      this->simulate_touch_internal_(x, y, action, client_id);
+    });
+  }
   return true;
 #else
   return false;
