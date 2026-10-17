@@ -386,3 +386,28 @@ test('Production remote.html: WebSocket disconnect and auto-recovery lifecycle',
   sandbox.__requestKeyframeRecovery();
   assert.equal(sent[0], 'K', 'Corrupt frame or error should request full keyframe K');
 });
+
+test('Production remote.html: mobile touch and viewport optimizations', () => {
+  // 1. Verify viewport meta tag prevents accidental zooming and supports edge-to-edge screens
+  assert.match(htmlContent, /<meta\s+name=["']viewport["']\s+content=["'][^"']*user-scalable=no[^"']*["']/, 'Viewport meta tag must include user-scalable=no');
+  assert.match(htmlContent, /<meta\s+name=["']viewport["']\s+content=["'][^"']*viewport-fit=cover[^"']*["']/, 'Viewport meta tag must include viewport-fit=cover');
+
+  // 2. Verify touch-action: none is applied to screen canvas and container to prevent viewport scrolling
+  assert.match(htmlContent, /\.screen-container\s*\{[^}]*touch-action:\s*none;/, '.screen-container must have touch-action: none');
+  assert.match(htmlContent, /#screenCanvas\s*\{[^}]*touch-action:\s*none;/, '#screenCanvas must have touch-action: none');
+
+  // 3. Verify overscroll-behavior: none prevents pull-to-refresh and rubber-band viewport movement
+  assert.match(htmlContent, /overscroll-behavior:\s*none;/, 'html, body must have overscroll-behavior: none');
+
+  // 4. Verify dynamic viewport units (100dvh) are used for mobile address bar resilience
+  assert.match(htmlContent, /100dvh/, 'CSS should use dynamic viewport units (100dvh)');
+
+  // 5. Verify contextmenu on canvas calls preventDefault
+  const { mockCanvas } = createRemoteContext();
+  let defaultPrevented = false;
+  mockCanvas.dispatchEvent('contextmenu', {
+    preventDefault: () => { defaultPrevented = true; },
+  });
+  assert.equal(defaultPrevented, true, 'canvas contextmenu must call preventDefault to suppress context menus during touch hold');
+});
+
