@@ -253,6 +253,8 @@
         };
         ws.onclose = () => {
           wsConnected = false;
+          pendingQueue = [];
+          isDecoding = false;
           const stat = document.getElementById('stat');
           if (stat) stat.textContent = 'HTTP Fallback';
           const mode = document.getElementById('mode');
@@ -268,9 +270,53 @@
         };
         ws.onerror = () => {
           wsConnected = false;
+          pendingQueue = [];
+          isDecoding = false;
           ws.close();
         };
-        let renderChain = Promise.resolve();
+
+        let isDecoding = false;
+        let pendingQueue = [];
+        const MAX_PENDING = 2;
+
+        const renderTile = (imgSource, magic, x, y, w, h) => {
+          if (magic === 0x46 && w > 0 && h > 0) {
+            hwWidth = w;
+            hwHeight = h;
+          }
+          drawTile(imgSource, x, y, w, h);
+          updateFpsCounter();
+        };
+
+        async function processQueue() {
+          if (isDecoding) return;
+          isDecoding = true;
+          while (pendingQueue.length > 0) {
+            const frame = pendingQueue.shift();
+            try {
+              if (window.createImageBitmap) {
+                const bmp = await createImageBitmap(frame.blob);
+                renderTile(bmp, frame.magic, frame.x, frame.y, frame.w, frame.h);
+                bmp.close();
+              } else {
+                await new Promise((resolve) => {
+                  const img = new Image();
+                  img.onload = () => {
+                    renderTile(img, frame.magic, frame.x, frame.y, frame.w, frame.h);
+                    URL.revokeObjectURL(img.src);
+                    resolve();
+                  };
+                  img.onerror = () => {
+                    URL.revokeObjectURL(img.src);
+                    resolve();
+                  };
+                  img.src = URL.createObjectURL(frame.blob);
+                });
+              }
+            } catch (e) {}
+          }
+          isDecoding = false;
+        }
 
         ws.onmessage = (event) => {
           if (typeof event.data === 'string') return;
@@ -299,38 +345,19 @@
             }
           }
 
+          // If a keyframe arrives, any queued delta tiles are obsolete and can be dropped
+          if (magic === 0x46) {
+            pendingQueue.length = 0;
+          } else if (pendingQueue.length >= MAX_PENDING) {
+            // Drop oldest pending tile to prevent memory accumulation under slow decoding
+            pendingQueue.shift();
+          }
+
           const jpegSlice = buf.slice(10);
           const blob = new Blob([jpegSlice], { type: 'image/jpeg' });
+          pendingQueue.push({ magic, x, y, w, h, blob });
 
-          const renderTile = (imgSource) => {
-            if (magic === 0x46 && w > 0 && h > 0) {
-              hwWidth = w;
-              hwHeight = h;
-            }
-            drawTile(imgSource, x, y, w, h);
-            updateFpsCounter();
-          };
-
-          renderChain = renderChain.then(async () => {
-            try {
-              if (window.createImageBitmap) {
-                const bmp = await createImageBitmap(blob);
-                renderTile(bmp);
-                bmp.close();
-              } else {
-                await new Promise((resolve) => {
-                  const img = new Image();
-                  img.onload = () => {
-                    renderTile(img);
-                    URL.revokeObjectURL(img.src);
-                    resolve();
-                  };
-                  img.onerror = resolve;
-                  img.src = URL.createObjectURL(blob);
-                });
-              }
-            } catch (e) {}
-          });
+          processQueue();
         };
       } catch (e) {
         wsConnected = false;
