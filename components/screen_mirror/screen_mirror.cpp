@@ -1083,6 +1083,7 @@ bool ScreenMirrorComponent::build_bmp_header(int width, int height, uint8_t *hea
 
 void ScreenMirrorComponent::release_touch_() {
 #ifdef USE_TOUCHSCREEN
+  this->cancel_timeout("touch_move");
   this->cancel_timeout("min_touch_hold");
   this->cancel_timeout("release_tap");
   this->touch_lease_.record_up();
