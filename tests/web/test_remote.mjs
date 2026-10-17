@@ -91,15 +91,24 @@ function createRemoteContext(canvasRect = { left: 0, top: 0, width: 800, height:
     }
   }
 
+  const docListeners = {};
+  const winListeners = {};
+
   const sandbox = {
     document: {
       getElementById: (id) => elements[id] || { textContent: '', style: {} },
-      addEventListener: () => {},
+      addEventListener: (type, fn) => {
+        if (!docListeners[type]) docListeners[type] = [];
+        docListeners[type].push(fn);
+      },
       createElement: () => ({ className: '', style: {}, remove: () => {} }),
       visibilityState: 'visible',
     },
     window: {
-      addEventListener: () => {},
+      addEventListener: (type, fn) => {
+        if (!winListeners[type]) winListeners[type] = [];
+        winListeners[type].push(fn);
+      },
       location: { protocol: 'http:', host: 'esphome.local' },
       devicePixelRatio: 1,
     },
@@ -151,6 +160,12 @@ globalThis.__requestKeyframeRecovery = () => { if (typeof requestKeyframeRecover
     sandbox,
     mockCanvas,
     elements,
+    dispatchDocEvent: (type, evt = {}) => {
+      for (const fn of (docListeners[type] || [])) fn(evt);
+    },
+    dispatchWinEvent: (type, evt = {}) => {
+      for (const fn of (winListeners[type] || [])) fn(evt);
+    },
     getSentWsMessages: () => wsSentMessages,
     setCanvasRect: (rect) => { currentRect = { ...rect }; },
     advanceTime: (ms) => { currentTime += ms; },
@@ -410,4 +425,47 @@ test('Production remote.html: mobile touch and viewport optimizations', () => {
   });
   assert.equal(defaultPrevented, true, 'canvas contextmenu must call preventDefault to suppress context menus during touch hold');
 });
+
+test('Production remote.html: tab visibility lifecycle (background disconnect, auto-recovery on visible, pagehide cleanup)', () => {
+  const { sandbox, elements, dispatchDocEvent, dispatchWinEvent, getSentWsMessages } = createRemoteContext();
+
+  // 1. Initial state: connected via WebSocket
+  sandbox.initWebSocket();
+  const ws = sandbox.__getWs();
+  assert.ok(ws, 'WebSocket should be initialized');
+  ws.onopen();
+  assert.equal(elements.stat.textContent, 'WS Connected');
+
+  // 2. Tab becomes hidden (user switches tab, minimizes Safari, locks screen)
+  sandbox.document.visibilityState = 'hidden';
+  dispatchDocEvent('visibilitychange');
+
+  // WebSocket must be closed immediately
+  assert.equal(ws.readyState, 3 /* CLOSED */, 'WebSocket must be closed when tab is hidden');
+  assert.equal(sandbox.__getWs(), null, 'ws reference must be null after hiding tab');
+  assert.equal(elements.stat.textContent, 'Paused (Background)', 'Status must show Paused (Background)');
+
+  // While hidden, attempting to initWebSocket must not create a new socket
+  sandbox.initWebSocket();
+  assert.equal(sandbox.__getWs(), null, 'initWebSocket must be a no-op while tab is hidden');
+
+  // 3. Tab becomes visible again
+  const sent = getSentWsMessages();
+  sent.length = 0;
+  sandbox.document.visibilityState = 'visible';
+  dispatchDocEvent('visibilitychange');
+
+  // New WebSocket must be opened
+  const resumedWs = sandbox.__getWs();
+  assert.ok(resumedWs, 'New WebSocket must be created when tab becomes visible');
+  resumedWs.onopen();
+  assert.equal(elements.stat.textContent, 'WS Connected');
+  assert.equal(sent[0], 'K', 'Resumed connection must immediately request keyframe K');
+
+  // 4. Pagehide (tab closed, window navigated away)
+  dispatchWinEvent('pagehide');
+  assert.equal(resumedWs.readyState, 3 /* CLOSED */, 'pagehide must close active WebSocket');
+  assert.equal(sandbox.__getWs(), null, 'ws reference must be null after pagehide');
+});
+
 
