@@ -556,7 +556,12 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
   auto cmd = parse_ws_packet(buf, ws_pkt.len);
   switch (cmd.type) {
     case WsCmdType::KEYFRAME:
-      mirror->send_full_keyframe(fd);
+      // Coalesce rapid keyframe requests using named defer ("ws_keyframe").
+      // If a client or multiple network packets request keyframes before loopTask can service them,
+      // earlier unexecuted keyframe items are replaced so only one full frame is encoded and sent.
+      mirror->defer("ws_keyframe", [mirror, fd]() {
+        mirror->send_full_keyframe(fd);
+      });
       break;
     case WsCmdType::TAP:
       mirror->simulate_tap(cmd.x, cmd.y, cmd.duration, fd);
@@ -1078,6 +1083,7 @@ bool ScreenMirrorComponent::build_bmp_header(int width, int height, uint8_t *hea
 
 void ScreenMirrorComponent::release_touch_() {
 #ifdef USE_TOUCHSCREEN
+  this->cancel_timeout("touch_move");
   this->cancel_timeout("min_touch_hold");
   this->cancel_timeout("release_tap");
   this->touch_lease_.record_up();
@@ -1135,10 +1141,27 @@ bool ScreenMirrorComponent::simulate_touch(int x, int y, const std::string &acti
   int hw_h = (this->display_ != nullptr) ? this->display_->get_native_height() : 480;
   clamp_coordinates(x, y, hw_w, hw_h);
 
-  // Marshal execution to main loop task for LVGL and ESPHome thread safety
-  this->defer([this, x, y, action, client_id]() {
-    this->simulate_touch_internal_(x, y, action, client_id);
-  });
+  // Marshal execution to main loop task for LVGL and ESPHome thread safety.
+  //
+  // Design Decision: Named Defer for Continuous Events vs. Anonymous Defer for Discrete Events.
+  // In ESPHome's Scheduler:
+  // - Anonymous defer (defer(fn)): static_name is nullptr, so cancellation is skipped. Every single
+  //   call appends a new lambda to defer_queue_. If client drag events arrive at 50-60 Hz while loopTask
+  //   is busy encoding/transmitting a frame, dozens of lambdas pile up, causing severe UI lag and buffer churn.
+  // - Named defer (defer("name", fn)): static_name is non-null. The scheduler automatically cancels any
+  //   unexecuted item with the same name before queueing the new one. Thus, continuous "move" events
+  //   automatically coalesce to the latest coordinate per loop tick!
+  // - Discrete state transitions ("down" and "up") must NEVER be coalesced or cancelled, so they use
+  //   anonymous defer to guarantee every press and release is processed in exact order.
+  if (action == "move") {
+    this->defer("touch_move", [this, x, y, client_id]() {
+      this->simulate_touch_internal_(x, y, "move", client_id);
+    });
+  } else {
+    this->defer([this, x, y, action, client_id]() {
+      this->simulate_touch_internal_(x, y, action, client_id);
+    });
+  }
   return true;
 #else
   return false;
