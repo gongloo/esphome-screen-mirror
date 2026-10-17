@@ -187,6 +187,10 @@ void ScreenMirrorComponent::setup() {
   };
 
   // 2. BMP Snapshot Handler (/screenshot.bmp)
+  // Design Decision: Zero-Copy Live DMA Scanout Streaming.
+  // Streams 16-bit RGB565 BMP chunks directly from active scanout memory without allocating
+  // an intermediate ~768 KB snapshot buffer in PSRAM. Active high-speed animations during
+  // download may exhibit progressive scanline tearing, which is expected for direct live DMA inspection.
   class BmpSnapshotHandler : public AsyncWebHandler {
    protected:
     ScreenMirrorComponent *parent_;

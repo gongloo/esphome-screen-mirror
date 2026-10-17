@@ -106,7 +106,7 @@ screen_mirror:
 | `/remote` | `GET` | Interactive web mirror with live stream, pointer dragging, touch ripple feedback, and HUD telemetry. |
 | `/ws` | `WebSocket` | Bidirectional binary stream (receives delta JPEG tiles & keyframes, sends low-latency touch events). |
 | `/screenshot.jpg` | `GET` | Hardware-accelerated JPEG snapshot (`/screenshot.jpeg` also supported). |
-| `/screenshot.bmp` | `GET` | Uncompressed 16-bit RGB565 BMP snapshot for pixel-perfect assertions. |
+| `/screenshot.bmp` | `GET` | Uncompressed 16-bit RGB565 BMP streamed directly from active DMA scanout memory. Ideal for automated testing and CI assertions. Note: because data is read directly from live display memory without intermediate freeze buffering, active on-screen animations may exhibit scanline tearing during download. |
 | `/mirror/info` | `GET` | JSON metadata (resolution, rotation, byte order, target FPS, JPEG quality, memory stats). |
 | `/tap?x=..&y=..` | `POST` | Simulate a touch tap at hardware coordinates `(x, y)` (`duration` ms optional, default: 180ms). |
 | `/touch?x=..&y=..&action=..` | `POST` | Inject continuous touch state (`action=down`, `move`, `up`) for live dragging & holds. |
