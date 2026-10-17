@@ -119,6 +119,17 @@ class TestScreenMirrorSchema(unittest.TestCase):
         with self.assertRaises(cv.Invalid):
             screen_mirror.CONFIG_SCHEMA({})
 
+    def test_web_path_and_options(self):
+        cfg = screen_mirror.CONFIG_SCHEMA({
+            "display": "disp",
+            "web_path": "/screen_stream",
+            "gated_streaming": False,
+            "show_telemetry": False,
+        })
+        self.assertEqual(cfg["web_path"], "/screen_stream")
+        self.assertEqual(cfg["gated_streaming"], False)
+        self.assertEqual(cfg["show_telemetry"], False)
+
 
 if __name__ == "__main__":
     unittest.main()

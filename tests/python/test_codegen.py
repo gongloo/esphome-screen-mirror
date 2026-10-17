@@ -78,6 +78,18 @@ class TestScreenMirrorCodegen(unittest.TestCase):
         # Ensure it decompresses losslessly
         self.assertEqual(gzip.decompress(gz_bytes), html_bytes)
 
+    def test_final_validate_auto_detect_rotation(self):
+        config = {"display": "d"}
+        fv.full_config.set({"display": [{"rotation": 180}]})
+        validated = screen_mirror._final_validate(config)
+        self.assertEqual(validated.get("rotation"), 180)
+
+    def test_final_validate_preserves_explicit(self):
+        config = {"display": "d", "rotation": 270}
+        fv.full_config.set({"display": [{"rotation": 90}]})
+        validated = screen_mirror._final_validate(config)
+        self.assertEqual(validated.get("rotation"), 270)
+
 
 if __name__ == "__main__":
     unittest.main()
