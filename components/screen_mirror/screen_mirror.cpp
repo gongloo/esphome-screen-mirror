@@ -821,6 +821,13 @@ bool ScreenMirrorComponent::send_dirty_update() {
 
   size_t total_payload_len = 0;
   {
+    // Critical: jpeg_mutex_ is scoped ONLY to JPEG hardware encoding.
+    // DEADLOCK FIX / TASK WDT: Previously, an encode_jpeg failure called send_full_keyframe(-1)
+    // while holding this->jpeg_mutex_. Because send_full_keyframe also acquires jpeg_mutex_
+    // on the same thread, it caused an immediate self-deadlock on loopTask, causing FreeRTOS
+    // Task Watchdog (TWDT) to trigger after 5 seconds.
+    // If delta encoding fails (e.g. temporary low DRAM), return false safely without escalating
+    // under lock. The client can request a keyframe or subsequent frames will resume naturally.
     std::lock_guard<std::mutex> jpeg_lock(this->jpeg_mutex_);
 
     // Encode JPEG into jpeg_buffer_ + 10 (leaving 10 bytes for binary header)
@@ -839,6 +846,7 @@ bool ScreenMirrorComponent::send_dirty_update() {
   }
 
 #if defined(USE_ESP32) && defined(CONFIG_HTTPD_WS_SUPPORT)
+  // Transmission happens outside jpeg_mutex_ so slow Wi-Fi clients never block HTTP snapshots or loopTask
   std::vector<int> clients;
   {
     std::lock_guard<std::mutex> lock(this->ws_mutex_);
