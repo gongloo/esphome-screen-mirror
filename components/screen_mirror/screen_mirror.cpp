@@ -533,29 +533,25 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
   }
   buf[ws_pkt.len] = '\0';
 
-  // Parse packet: "T <x> <y>", "D <x> <y>", "M <x> <y>", "U" (or "U <x> <y>"), "K" (keyframe request)
-  char action_char = buf[0];
-  int x = 0, y = 0;
-  if (action_char == 'K' || action_char == 'k') {
-    mirror->send_full_keyframe(fd);
-  } else if (action_char == 'T' || action_char == 't') {
-    if (sscanf(buf + 1, "%d %d", &x, &y) == 2) {
-      mirror->simulate_tap(x, y, 80, fd);
-    }
-  } else if (action_char == 'D' || action_char == 'd') {
-    if (sscanf(buf + 1, "%d %d", &x, &y) == 2) {
-      mirror->simulate_touch(x, y, "down", fd);
-    }
-  } else if (action_char == 'M' || action_char == 'm') {
-    if (sscanf(buf + 1, "%d %d", &x, &y) == 2) {
-      mirror->simulate_touch(x, y, "move", fd);
-    }
-  } else if (action_char == 'U' || action_char == 'u') {
-    if (sscanf(buf + 1, "%d %d", &x, &y) == 2) {
-      mirror->simulate_touch(x, y, "up", fd);
-    } else {
-      mirror->simulate_touch(0, 0, "up", fd);
-    }
+  auto cmd = parse_ws_packet(buf, ws_pkt.len);
+  switch (cmd.type) {
+    case WsCmdType::KEYFRAME:
+      mirror->send_full_keyframe(fd);
+      break;
+    case WsCmdType::TAP:
+      mirror->simulate_tap(cmd.x, cmd.y, cmd.duration, fd);
+      break;
+    case WsCmdType::DOWN:
+      mirror->simulate_touch(cmd.x, cmd.y, "down", fd);
+      break;
+    case WsCmdType::MOVE:
+      mirror->simulate_touch(cmd.x, cmd.y, "move", fd);
+      break;
+    case WsCmdType::UP:
+      mirror->simulate_touch(cmd.x, cmd.y, "up", fd);
+      break;
+    default:
+      break;
   }
 
   return ESP_OK;
@@ -569,30 +565,7 @@ bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload
     return false;
   }
 
-  uint8_t ws_hdr[10];
-  size_t hdr_len = 0;
-  ws_hdr[0] = 0x82; // FIN bit (0x80) | Binary opcode (0x02)
-
-  if (len < 126) {
-    ws_hdr[1] = static_cast<uint8_t>(len);
-    hdr_len = 2;
-  } else if (len <= 65535) {
-    ws_hdr[1] = 126;
-    ws_hdr[2] = static_cast<uint8_t>((len >> 8) & 0xFF);
-    ws_hdr[3] = static_cast<uint8_t>(len & 0xFF);
-    hdr_len = 4;
-  } else {
-    ws_hdr[1] = 127;
-    ws_hdr[2] = 0;
-    ws_hdr[3] = 0;
-    ws_hdr[4] = 0;
-    ws_hdr[5] = 0;
-    ws_hdr[6] = static_cast<uint8_t>((len >> 24) & 0xFF);
-    ws_hdr[7] = static_cast<uint8_t>((len >> 16) & 0xFF);
-    ws_hdr[8] = static_cast<uint8_t>((len >> 8) & 0xFF);
-    ws_hdr[9] = static_cast<uint8_t>(len & 0xFF);
-    hdr_len = 10;
-  }
+  auto ws_frame = encode_ws_frame_header(len);
 
   uint32_t elapsed_ms = 0;
   const uint32_t max_budget_ms = 15; // 15ms hard transmission budget to protect loopTask
@@ -615,17 +588,16 @@ bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
           uint32_t now = millis();
           current_elapsed = (now - start_time) + elapsed;
-          if (current_elapsed >= max_budget) {
+          auto budget_res = calculate_budget_wait(current_elapsed, max_budget);
+          if (budget_res.timed_out) {
             elapsed = current_elapsed;
             return false;
           }
-          uint32_t remaining_ms = max_budget - current_elapsed;
-          uint32_t wait_us = std::min<uint32_t>(remaining_ms * 1000, 10000); // at most 10ms select wait
 
           fd_set wset;
           FD_ZERO(&wset);
           FD_SET(sockfd, &wset);
-          struct timeval tv = {.tv_sec = 0, .tv_usec = static_cast<suseconds_t>(wait_us)};
+          struct timeval tv = {.tv_sec = 0, .tv_usec = static_cast<suseconds_t>(budget_res.wait_us)};
           int sel = select(sockfd + 1, nullptr, &wset, nullptr, &tv);
           if (sel > 0) {
             continue;
@@ -641,7 +613,7 @@ bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload
     return true;
   };
 
-  if (!send_all(fd, ws_hdr, hdr_len, max_budget_ms, elapsed_ms))
+  if (!send_all(fd, ws_frame.bytes, ws_frame.length, max_budget_ms, elapsed_ms))
     return false;
   return send_all(fd, payload, len, max_budget_ms, elapsed_ms);
 }
@@ -664,7 +636,8 @@ void ScreenMirrorComponent::remove_ws_client(int fd) {
     this->ws_client_fds_.erase(it);
     ESP_LOGI(TAG, "WebSocket client removed (fd: %d, total active: %zu)", fd, this->ws_client_fds_.size());
   }
-  if (this->active_touch_client_ == fd) {
+  if (this->touch_lease_.get_active_client() == fd) {
+    this->touch_lease_.handle_disconnect(fd);
     this->defer([this]() {
       this->release_touch_();
     });
@@ -730,10 +703,8 @@ void ScreenMirrorComponent::add_dirty_area(int x1, int y1, int x2, int y2) {
   int hw_w = (this->display_ != nullptr) ? this->display_->get_native_width() : 800;
   int hw_h = (this->display_ != nullptr) ? this->display_->get_native_height() : 480;
 
-  x1 = std::max(0, std::min(hw_w - 1, x1));
-  y1 = std::max(0, std::min(hw_h - 1, y1));
-  x2 = std::max(0, std::min(hw_w - 1, x2));
-  y2 = std::max(0, std::min(hw_h - 1, y2));
+  clamp_coordinates(x1, y1, hw_w, hw_h);
+  clamp_coordinates(x2, y2, hw_w, hw_h);
 
   // Snap to 16-pixel multiples for JPEG MCU compatibility
   int snap_x1 = (x1 / 16) * 16;
@@ -833,16 +804,7 @@ bool ScreenMirrorComponent::send_dirty_update() {
 
     // Fill 10-byte binary header
     uint8_t rot_code = static_cast<uint8_t>((this->rotation_ / 90) & 0x03);
-    this->jpeg_buffer_[0] = 0x44; // 'D' = Delta
-    this->jpeg_buffer_[1] = (rot_code << 2); // flags: rotation in bits 2-3, bit 0 = 0 (delta)
-    this->jpeg_buffer_[2] = static_cast<uint8_t>((x1 >> 8) & 0xFF);
-    this->jpeg_buffer_[3] = static_cast<uint8_t>(x1 & 0xFF);
-    this->jpeg_buffer_[4] = static_cast<uint8_t>((y1 >> 8) & 0xFF);
-    this->jpeg_buffer_[5] = static_cast<uint8_t>(y1 & 0xFF);
-    this->jpeg_buffer_[6] = static_cast<uint8_t>((w >> 8) & 0xFF);
-    this->jpeg_buffer_[7] = static_cast<uint8_t>(w & 0xFF);
-    this->jpeg_buffer_[8] = static_cast<uint8_t>((h >> 8) & 0xFF);
-    this->jpeg_buffer_[9] = static_cast<uint8_t>(h & 0xFF);
+    encode_mirror_header(false, rot_code, x1, y1, w, h, this->jpeg_buffer_);
 
     total_payload_len = 10 + out_size;
   }
@@ -890,16 +852,7 @@ bool ScreenMirrorComponent::send_full_keyframe(int target_fd) {
 
     // Fill 10-byte binary header
     uint8_t rot_code = static_cast<uint8_t>((this->rotation_ / 90) & 0x03);
-    this->jpeg_buffer_[0] = 0x46; // 'F' = Full Keyframe
-    this->jpeg_buffer_[1] = (rot_code << 2) | 0x01; // flags: rotation in bits 2-3, bit 0 = 1 (IS_KEYFRAME)
-    this->jpeg_buffer_[2] = 0;
-    this->jpeg_buffer_[3] = 0;
-    this->jpeg_buffer_[4] = 0;
-    this->jpeg_buffer_[5] = 0;
-    this->jpeg_buffer_[6] = static_cast<uint8_t>((hw_w >> 8) & 0xFF);
-    this->jpeg_buffer_[7] = static_cast<uint8_t>(hw_w & 0xFF);
-    this->jpeg_buffer_[8] = static_cast<uint8_t>((hw_h >> 8) & 0xFF);
-    this->jpeg_buffer_[9] = static_cast<uint8_t>(hw_h & 0xFF);
+    encode_mirror_header(true, rot_code, 0, 0, hw_w, hw_h, this->jpeg_buffer_);
 
     total_payload_len = 10 + out_size;
   }
@@ -1048,7 +1001,7 @@ bool ScreenMirrorComponent::encode_jpeg(const uint8_t *rgb565_buffer, int width,
   } else {
     // Dynamic tile: apply pre-flight internal DRAM guard (require at least 35 KB free internal memory)
     size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (free_internal < 35 * 1024) {
+    if (is_dram_low_for_delta(free_internal, 35 * 1024)) {
       ESP_LOGW(TAG, "Skipping tile encode: low internal DRAM (%zu bytes free)", free_internal);
       return false;
     }
@@ -1087,66 +1040,14 @@ bool ScreenMirrorComponent::encode_jpeg(const uint8_t *rgb565_buffer, int width,
 }
 
 bool ScreenMirrorComponent::build_bmp_header(int width, int height, uint8_t *header_66) {
-  std::memset(header_66, 0, 66);
-  uint32_t image_size = width * height * 2;
-  uint32_t file_size = 66 + image_size;
-
-  // Bitmap File Header (14 bytes)
-  header_66[0] = 'B';
-  header_66[1] = 'M';
-  header_66[2] = (uint8_t)(file_size);
-  header_66[3] = (uint8_t)(file_size >> 8);
-  header_66[4] = (uint8_t)(file_size >> 16);
-  header_66[5] = (uint8_t)(file_size >> 24);
-  header_66[10] = 66; // Data offset (14 file header + 40 DIB header + 12 bitmasks)
-
-  // DIB Header (BITMAPINFOHEADER - 40 bytes)
-  header_66[14] = 40; // Header size
-  header_66[18] = (uint8_t)(width);
-  header_66[19] = (uint8_t)(width >> 8);
-  header_66[20] = (uint8_t)(width >> 16);
-  header_66[21] = (uint8_t)(width >> 24);
-  // Negative height specifies top-down bitmap (origin upper-left)
-  int32_t neg_height = -height;
-  header_66[22] = (uint8_t)(neg_height);
-  header_66[23] = (uint8_t)(neg_height >> 8);
-  header_66[24] = (uint8_t)(neg_height >> 16);
-  header_66[25] = (uint8_t)(neg_height >> 24);
-  header_66[26] = 1;  // Planes
-  header_66[28] = 16; // Bits per pixel (RGB565)
-  header_66[30] = 3;  // BI_BITFIELDS (required for 16-bit RGB565, value 3)
-  header_66[34] = (uint8_t)(image_size);
-  header_66[35] = (uint8_t)(image_size >> 8);
-  header_66[36] = (uint8_t)(image_size >> 16);
-  header_66[37] = (uint8_t)(image_size >> 24);
-
-  // BI_BITFIELDS RGB channel bitmasks (12 bytes, 3x DWORD little-endian)
-  // Red mask: 0x0000F800 (bits 11-15)
-  header_66[54] = 0x00;
-  header_66[55] = 0xF8;
-  header_66[56] = 0x00;
-  header_66[57] = 0x00;
-
-  // Green mask: 0x000007E0 (bits 5-10)
-  header_66[58] = 0xE0;
-  header_66[59] = 0x07;
-  header_66[60] = 0x00;
-  header_66[61] = 0x00;
-
-  // Blue mask: 0x0000001F (bits 0-4)
-  header_66[62] = 0x1F;
-  header_66[63] = 0x00;
-  header_66[64] = 0x00;
-  header_66[65] = 0x00;
-
-  return true;
+  return screen_mirror::build_bmp_header(width, height, header_66);
 }
 
 void ScreenMirrorComponent::release_touch_() {
 #ifdef USE_TOUCHSCREEN
   this->cancel_timeout("min_touch_hold");
   this->cancel_timeout("release_tap");
-  this->active_touch_client_ = 0;
+  this->touch_lease_.record_up();
   if (this->touchscreen_ != nullptr && this->is_touch_down_) {
     for (auto *listener : TouchscreenAccess::get_listeners(this->touchscreen_)) {
       listener->release();
@@ -1170,8 +1071,7 @@ bool ScreenMirrorComponent::simulate_tap(int x, int y, uint16_t duration_ms, int
 
   int hw_w = (this->display_ != nullptr) ? this->display_->get_native_width() : 800;
   int hw_h = (this->display_ != nullptr) ? this->display_->get_native_height() : 480;
-  x = std::max(0, std::min(hw_w - 1, x));
-  y = std::max(0, std::min(hw_h - 1, y));
+  clamp_coordinates(x, y, hw_w, hw_h);
 
   // Marshal execution to main loop task for LVGL and ESPHome thread safety
   this->defer([this, x, y, duration_ms, client_id]() {
@@ -1200,8 +1100,7 @@ bool ScreenMirrorComponent::simulate_touch(int x, int y, const std::string &acti
 
   int hw_w = (this->display_ != nullptr) ? this->display_->get_native_width() : 800;
   int hw_h = (this->display_ != nullptr) ? this->display_->get_native_height() : 480;
-  x = std::max(0, std::min(hw_w - 1, x));
-  y = std::max(0, std::min(hw_h - 1, y));
+  clamp_coordinates(x, y, hw_w, hw_h);
 
   // Marshal execution to main loop task for LVGL and ESPHome thread safety
   this->defer([this, x, y, action, client_id]() {
@@ -1218,13 +1117,11 @@ void ScreenMirrorComponent::simulate_touch_internal_(int x, int y, const std::st
   if (this->touchscreen_ == nullptr) return;
 
   uint32_t now = millis();
-  const uint32_t lease_timeout_ms = 3000;
 
   if (action == "down") {
     // If a touch is already held down by another client and lease hasn't expired, reject conflicting touch
-    if (this->is_touch_down_ && this->active_touch_client_ != 0 &&
-        this->active_touch_client_ != client_id && (now - this->last_touch_down_time_ < lease_timeout_ms)) {
-      ESP_LOGD(TAG, "Touch rejected: active lease held by client %d", this->active_touch_client_);
+    if (!this->touch_lease_.can_process_down(client_id, now, this->is_touch_down_)) {
+      ESP_LOGD(TAG, "Touch rejected: active lease held by client %d", this->touch_lease_.get_active_client());
       return;
     }
 
@@ -1235,8 +1132,7 @@ void ScreenMirrorComponent::simulate_touch_internal_(int x, int y, const std::st
     this->cancel_timeout("min_touch_hold");
     this->cancel_timeout("release_tap");
 
-    this->active_touch_client_ = client_id;
-    this->last_touch_down_time_ = now;
+    this->touch_lease_.record_down(client_id, now);
     this->last_touch_x_ = x;
     this->last_touch_y_ = y;
 
@@ -1269,8 +1165,7 @@ void ScreenMirrorComponent::simulate_touch_internal_(int x, int y, const std::st
       return;
     }
     // Only the client holding the lease (or any client after lease expiration) can move
-    if (this->active_touch_client_ != 0 && this->active_touch_client_ != client_id &&
-        (now - this->last_touch_down_time_ < lease_timeout_ms)) {
+    if (!this->touch_lease_.can_process_move(client_id)) {
       return;
     }
 
@@ -1299,11 +1194,10 @@ void ScreenMirrorComponent::simulate_touch_internal_(int x, int y, const std::st
     if (!this->is_touch_down_) {
       return;
     }
-    if (this->active_touch_client_ != 0 && this->active_touch_client_ != client_id &&
-        (now - this->last_touch_down_time_ < lease_timeout_ms)) {
+    if (!this->touch_lease_.can_process_up(client_id)) {
       return;
     }
-    uint32_t elapsed = millis() - this->last_touch_down_time_;
+    uint32_t elapsed = millis() - this->touch_lease_.get_last_down_time();
     // Design Decision: LVGL Touch Dwell Time Guarantee.
     // Enforce a minimum 180ms touch hold time on the device. Because LVGL's input indev handler
     // runs periodically in ticks (typically every 30-50ms), a momentary touch release (<100ms)

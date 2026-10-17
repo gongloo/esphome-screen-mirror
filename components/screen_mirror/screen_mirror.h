@@ -12,6 +12,11 @@
 #include <vector>
 #include <mutex>
 
+#include "bmp_builder.h"
+#include "protocol.h"
+#include "touch_lease.h"
+#include "budget_limiter.h"
+
 namespace esphome {
 namespace screen_mirror {
 
@@ -73,7 +78,7 @@ class ScreenMirrorComponent : public Component {
  protected:
   void release_touch_();
   void simulate_touch_internal_(int x, int y, const std::string &action, int client_id = 0);
-  int active_touch_client_{0};
+  TouchLeaseManager touch_lease_{};
 
   display::Display *display_{nullptr};
 #ifdef USE_TOUCHSCREEN
