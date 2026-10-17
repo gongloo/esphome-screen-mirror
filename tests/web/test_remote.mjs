@@ -95,6 +95,7 @@ function createRemoteContext(canvasRect = { left: 0, top: 0, width: 800, height:
 
   const docListeners = {};
   const winListeners = {};
+  let lastMockImage = null;
 
   const sandbox = {
     document: {
@@ -119,7 +120,14 @@ function createRemoteContext(canvasRect = { left: 0, top: 0, width: 800, height:
       now: () => currentTime,
     },
     WebSocket: MockWebSocket,
-    Image: class MockImage {},
+    Image: class MockImage {
+      constructor() {
+        lastMockImage = this;
+        this.onload = null;
+        this.onerror = null;
+        this.src = '';
+      }
+    },
     Blob: class MockBlob {
       constructor(parts, options) {
         this.parts = parts;
@@ -169,6 +177,7 @@ globalThis.__requestKeyframeRecovery = () => { if (typeof requestKeyframeRecover
       for (const fn of (winListeners[type] || [])) fn(evt);
     },
     getSentWsMessages: () => wsSentMessages,
+    getLastMockImage: () => lastMockImage,
     setCanvasRect: (rect) => { currentRect = { ...rect }; },
     advanceTime: (ms) => { currentTime += ms; },
     fireTimers: () => {
@@ -517,6 +526,49 @@ test('Production remote.html: screen dimming and banner state transitions ("Conn
   assert.equal(elements.banner.textContent, 'Disconnected', 'Banner must display "Disconnected" on pagehide cleanup');
   assert.equal(elements.screenOverlay.style.display, 'flex', 'Banner overlay must be visible on cleanup');
   assert.equal(mockCanvas.style.filter, 'brightness(0.6)', 'Screen must be dimmed on cleanup');
+});
+
+test('Production remote.html: visible disconnect & HTTP fallback error handling (Connecting banner during OTA)', () => {
+  // Verify increased banner sizing styles
+  assert.match(htmlContent, /font-size:\s*20px;/, 'Banner should have increased font-size (20px)');
+  assert.match(htmlContent, /padding:\s*16px\s+36px;/, 'Banner should have increased padding (16px 36px)');
+
+  const { sandbox, elements, mockCanvas, getLastMockImage } = createRemoteContext();
+
+  // 1. Connect via WebSocket
+  sandbox.initWebSocket();
+  const ws = sandbox.__getWs();
+  assert.ok(ws);
+  ws.onopen();
+  assert.equal(elements.screenOverlay.style.display, 'none');
+
+  // 2. Disconnect while visible (e.g. ESP32 enters OTA and drops client sockets)
+  ws.onclose();
+  assert.equal(elements.banner.textContent, 'Connecting', 'Must show Connecting banner when disconnected while visible');
+  assert.equal(elements.screenOverlay.style.display, 'flex', 'Overlay must be visible when disconnected while visible');
+  assert.equal(mockCanvas.style.filter, 'brightness(0.6)', 'Canvas must be dimmed when disconnected while visible');
+  assert.equal(elements.stat.textContent, 'HTTP Fallback', 'Status shows HTTP Fallback');
+
+  // 3. Trigger HTTP snapshot refresh failure (e.g. HTTP 503 during OTA)
+  const refreshPromise = sandbox.refreshScreen(false);
+  const img1 = getLastMockImage();
+  assert.ok(img1, 'Image instance should be created by refreshScreen');
+  img1.onerror(); // Simulate 503 response
+  return refreshPromise.then(() => {
+    assert.equal(elements.banner.textContent, 'Connecting', 'Must keep Connecting banner on snapshot failure');
+    assert.equal(elements.screenOverlay.style.display, 'flex', 'Overlay must remain visible on snapshot failure');
+    assert.equal(mockCanvas.style.filter, 'brightness(0.6)', 'Canvas must stay dimmed on snapshot failure');
+
+    // 4. Simulate recovery once OTA finishes (HTTP 200 snapshot loads)
+    const recoveryPromise = sandbox.refreshScreen(false);
+    const img2 = getLastMockImage();
+    assert.ok(img2);
+    img2.onload();
+    return recoveryPromise.then(() => {
+      assert.equal(elements.screenOverlay.style.display, 'none', 'Banner overlay must hide when snapshot succeeds');
+      assert.equal(mockCanvas.style.filter, '', 'Canvas dimming must be cleared when snapshot succeeds');
+    });
+  });
 });
 
 
