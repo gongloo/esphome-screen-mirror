@@ -699,11 +699,14 @@ void ScreenMirrorComponent::close_dead_socket(int fd) {
   close(fd);
 }
 
+// Design Decision: Lazy hook registration for LVGL displays.
+// The default LVGL display (lv_display_get_default()) may not be registered yet during setup()
+// due to component initialization order. We log at DEBUG level and retry in loop() until hooked.
 void ScreenMirrorComponent::setup_lvgl_hooks() {
 #if defined(HAS_LVGL)
   lv_display_t *disp = lv_display_get_default();
   if (disp == nullptr) {
-    ESP_LOGW(TAG, "No default LVGL display found; delta region streaming unavailable");
+    ESP_LOGD(TAG, "No default LVGL display found yet; waiting for display");
     return;
   }
 
@@ -931,6 +934,12 @@ void ScreenMirrorComponent::loop() {
         this->simulate_touch_internal_(step_out.x, step_out.y, "move", client_id);
       }
     }
+  }
+#endif
+
+#if defined(HAS_LVGL)
+  if (!this->lvgl_hooked_) {
+    this->setup_lvgl_hooks();
   }
 #endif
 
