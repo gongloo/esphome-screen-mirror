@@ -43,3 +43,29 @@ TEST_CASE("Socket Budget: Production calculate_budget_wait 15ms limit calculatio
     CHECK(res.wait_us == 0);
   }
 }
+
+TEST_CASE("Socket Budget: Default 1500ms budget for keyframes and delta tiles") {
+  SUBCASE("Initial start with default budget") {
+    auto res = calculate_budget_wait(0);
+    CHECK(res.timed_out == false);
+    CHECK(res.wait_us == 10000); // 10ms slice
+  }
+
+  SUBCASE("Midway progress (500ms elapsed)") {
+    auto res = calculate_budget_wait(500);
+    CHECK(res.timed_out == false);
+    CHECK(res.wait_us == 10000);
+  }
+
+  SUBCASE("Near end of budget (1495ms elapsed, 5ms remaining)") {
+    auto res = calculate_budget_wait(1495);
+    CHECK(res.timed_out == false);
+    CHECK(res.wait_us == 5000);
+  }
+
+  SUBCASE("Budget expired (1500ms elapsed)") {
+    auto res = calculate_budget_wait(1500);
+    CHECK(res.timed_out == true);
+    CHECK(res.wait_us == 0);
+  }
+}

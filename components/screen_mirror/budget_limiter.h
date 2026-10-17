@@ -11,7 +11,7 @@ struct BudgetWaitResult {
   uint32_t wait_us;
 };
 
-inline BudgetWaitResult calculate_budget_wait(uint32_t current_elapsed_ms, uint32_t max_budget_ms = 15) {
+inline BudgetWaitResult calculate_budget_wait(uint32_t current_elapsed_ms, uint32_t max_budget_ms = 1500) {
   if (current_elapsed_ms >= max_budget_ms) {
     return {true, 0};
   }

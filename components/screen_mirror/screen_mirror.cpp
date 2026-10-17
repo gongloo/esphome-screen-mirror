@@ -570,7 +570,7 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
 }
 #endif
 
-bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload, size_t len) {
+bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload, size_t len, uint32_t max_budget_ms) {
   int sock_err = 0;
   socklen_t opt_len = sizeof(sock_err);
   if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &sock_err, &opt_len) < 0 || sock_err != 0) {
@@ -580,7 +580,6 @@ bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload
   auto ws_frame = encode_ws_frame_header(len);
 
   uint32_t elapsed_ms = 0;
-  const uint32_t max_budget_ms = 15; // 15ms hard transmission budget to protect loopTask
 
   auto send_all = [](int sockfd, const uint8_t *data, size_t total, uint32_t max_budget, uint32_t &elapsed) -> bool {
     size_t sent = 0;
