@@ -7,6 +7,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <errno.h>
+#include <unistd.h>
 
 #include <esp_heap_caps.h>
 #include <esp_jpeg_enc.h>
@@ -439,6 +440,26 @@ void ScreenMirrorComponent::setup() {
       return true;
     };
 
+    // Design Decision: Proactive Socket Descriptor Lifecycle Tracking.
+    // Intercept httpd's session close callback so when any connection drops or closes,
+    // its socket descriptor is immediately pruned from ws_client_fds_. This prevents
+    // stale descriptors from colliding with newly opened connections (such as Home Assistant API).
+    static ScreenMirrorComponent *s_mirror_instance = nullptr;
+    static httpd_close_func_t s_prev_close_fn = nullptr;
+    s_mirror_instance = this;
+    s_prev_close_fn = data->config.close_fn;
+
+    data->config.close_fn = [](httpd_handle_t server_hd, int sockfd) {
+      if (s_mirror_instance != nullptr) {
+        s_mirror_instance->remove_ws_client(sockfd);
+      }
+      if (s_prev_close_fn != nullptr) {
+        s_prev_close_fn(server_hd, sockfd);
+      } else {
+        close(sockfd);
+      }
+    };
+
     httpd_uri_t ws_uri = {
       .uri = "/ws",
       .method = HTTP_GET,
@@ -542,6 +563,12 @@ esp_err_t ScreenMirrorComponent::ws_handler(httpd_req_t *req) {
 #endif
 
 bool ScreenMirrorComponent::send_ws_binary_packet(int fd, const uint8_t *payload, size_t len) {
+  int sock_err = 0;
+  socklen_t opt_len = sizeof(sock_err);
+  if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &sock_err, &opt_len) < 0 || sock_err != 0) {
+    return false;
+  }
+
   uint8_t ws_hdr[10];
   size_t hdr_len = 0;
   ws_hdr[0] = 0x82; // FIN bit (0x80) | Binary opcode (0x02)
