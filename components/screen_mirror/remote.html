@@ -44,7 +44,7 @@
   <div class="header">
     <div class="badge">Device: <span id="res">-</span></div>
     <div class="badge">Orientation: <span id="rot">0°</span></div>
-    <div class="badge">Latency: <span id="lat">-</span> ms</div>
+    <div class="badge"><span id="metricLbl">Rate</span>: <span id="lat">-</span></div>
     <div class="badge">Mode: <span id="mode" style="color: #10b981">Live Mirror</span></div>
     <div class="badge">Status: <span id="stat" style="color: #10b981">Connected</span></div>
   </div>
@@ -61,6 +61,7 @@
     const canvas = document.getElementById('screenCanvas');
     const ctx = canvas.getContext('2d');
     const container = document.getElementById('container');
+    const metricLbl = document.getElementById('metricLbl');
     const latSpan = document.getElementById('lat');
     const resSpan = document.getElementById('res');
     const rotSpan = document.getElementById('rot');
@@ -127,7 +128,8 @@
         img.onload = () => {
           if (reqTime >= lastRenderedTime) {
             lastRenderedTime = reqTime;
-            latSpan.textContent = Math.round(performance.now() - reqTime);
+            if (metricLbl) metricLbl.textContent = 'Latency';
+            latSpan.textContent = `${Math.round(performance.now() - reqTime)} ms`;
             drawRotated(img);
           }
           isRefreshing = false;
@@ -221,9 +223,9 @@
       while (frameTimes.length > 0 && frameTimes[0] < now - 1000) {
         frameTimes.shift();
       }
-      const lat = document.getElementById('lat');
-      if (lat && frameTimes.length > 0) {
-        lat.textContent = `${frameTimes.length} fps`;
+      if (metricLbl) metricLbl.textContent = 'Rate';
+      if (latSpan) {
+        latSpan.textContent = `${frameTimes.length} fps`;
       }
     }
 
@@ -239,6 +241,8 @@
           if (stat) stat.textContent = 'WS Connected';
           const mode = document.getElementById('mode');
           if (mode) mode.textContent = 'Delta WS (LVGL)';
+          if (metricLbl) metricLbl.textContent = 'Rate';
+          if (latSpan) latSpan.textContent = '0 fps';
           // Suspend HTTP polling because WebSocket pushes dirty tile updates
           pollingActive = false;
           // Request full keyframe once WebSocket handshake is established
@@ -250,6 +254,8 @@
           if (stat) stat.textContent = 'HTTP Fallback';
           const mode = document.getElementById('mode');
           if (mode) mode.textContent = 'Live Mirror';
+          if (metricLbl) metricLbl.textContent = 'Latency';
+          if (latSpan) latSpan.textContent = '-';
           // Resume HTTP polling if WebSocket closes
           if (!pollingActive) {
             pollingActive = true;
