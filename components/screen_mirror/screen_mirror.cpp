@@ -853,14 +853,15 @@ void ScreenMirrorComponent::loop() {
   if (this->swipe_gesture_.is_active() && this->touchscreen_ != nullptr) {
     SwipeStepOutput step_out;
     if (this->swipe_gesture_.step(millis(), step_out)) {
+      int client_id = this->swipe_gesture_.get_client_id();
       if (step_out.is_final) {
         // Final coordinate
-        this->simulate_touch_internal_(step_out.x, step_out.y, "move", this->active_touch_client_);
+        this->simulate_touch_internal_(step_out.x, step_out.y, "move", client_id);
         // Release touch
-        this->simulate_touch_internal_(step_out.x, step_out.y, "up", this->active_touch_client_);
+        this->simulate_touch_internal_(step_out.x, step_out.y, "up", client_id);
         ESP_LOGD(TAG, "Swipe completed at (%d, %d)", step_out.x, step_out.y);
       } else {
-        this->simulate_touch_internal_(step_out.x, step_out.y, "move", this->active_touch_client_);
+        this->simulate_touch_internal_(step_out.x, step_out.y, "move", client_id);
       }
     }
   }

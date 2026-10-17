@@ -26,7 +26,7 @@ namespace screen_mirror {
 class ScreenMirrorComponent : public Component {
  public:
   ScreenMirrorComponent() = default;
-  ~ScreenMirrorComponent() override;
+  ~ScreenMirrorComponent();
 
   void set_display(display::Display *disp) { this->display_ = disp; }
 #ifdef USE_TOUCHSCREEN
