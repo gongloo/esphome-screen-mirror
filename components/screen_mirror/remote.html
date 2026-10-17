@@ -389,7 +389,31 @@
       isDecoding = false;
     }
 
+    let wsRetryAttempts = 0;
+    let wsRetryTimer = null;
+
+    function scheduleWsReconnect() {
+      if (wsRetryTimer) {
+        clearTimeout(wsRetryTimer);
+        wsRetryTimer = null;
+      }
+      if (document.visibilityState === 'hidden') {
+        return;
+      }
+      // Exponential backoff: 2s -> 4s -> 8s -> max 16s
+      const delay = Math.min(16000, 2000 * Math.pow(2, Math.min(wsRetryAttempts, 3)));
+      wsRetryAttempts++;
+      wsRetryTimer = setTimeout(() => {
+        wsRetryTimer = null;
+        initWebSocket();
+      }, delay);
+    }
+
     function initWebSocket() {
+      if (wsRetryTimer) {
+        clearTimeout(wsRetryTimer);
+        wsRetryTimer = null;
+      }
       if (document.visibilityState === 'hidden') {
         return;
       }
@@ -403,15 +427,7 @@
         ws = new WebSocket(wsUrl);
         ws.binaryType = 'arraybuffer';
         ws.onopen = () => {
-          wsConnected = true;
-          hideBanner();
-          const stat = document.getElementById('stat');
-          if (stat) stat.textContent = 'WS Connected';
-          const mode = document.getElementById('mode');
-          if (mode) mode.textContent = 'Delta WS (LVGL)';
-          if (metricLbl) metricLbl.textContent = 'Rate';
-          if (latSpan) latSpan.textContent = '0 fps';
-          // Suspend HTTP polling because WebSocket pushes dirty tile updates
+          // Suspend HTTP polling because WebSocket handshake was established
           pollingActive = false;
           // Request full keyframe once WebSocket handshake is established
           ws.send('K');
@@ -438,7 +454,7 @@
             pollingActive = true;
             startContinuousPolling();
           }
-          setTimeout(initWebSocket, 2000);
+          scheduleWsReconnect();
         };
         ws.onerror = () => {
           wsConnected = false;
@@ -453,6 +469,20 @@
 
           const buf = event.data;
           if (buf.byteLength < 10) return;
+
+          // Gate 'WS Connected' and banner dismissal on receiving the first valid frame
+          if (!wsConnected) {
+            wsConnected = true;
+            wsRetryAttempts = 0;
+            hideBanner();
+            const stat = document.getElementById('stat');
+            if (stat) stat.textContent = 'WS Connected';
+            const mode = document.getElementById('mode');
+            if (mode) mode.textContent = 'Delta WS (LVGL)';
+            if (metricLbl) metricLbl.textContent = 'Rate';
+            if (latSpan) latSpan.textContent = '0 fps';
+            pollingActive = false;
+          }
 
           const view = new DataView(buf);
           const magic = view.getUint8(0);
@@ -607,6 +637,10 @@
     // Tab visibility lifecycle: disconnect WebSocket and suspend polling when backgrounded
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') {
+        if (wsRetryTimer) {
+          clearTimeout(wsRetryTimer);
+          wsRetryTimer = null;
+        }
         pollingActive = false;
         if (ws) {
           try { ws.close(); } catch (e) {}
@@ -621,11 +655,16 @@
         const stat = document.getElementById('stat');
         if (stat) stat.textContent = 'Reconnecting...';
         showBanner('Connecting');
+        wsRetryAttempts = 0;
         initWebSocket();
       }
     });
 
     const cleanupConnections = () => {
+      if (wsRetryTimer) {
+        clearTimeout(wsRetryTimer);
+        wsRetryTimer = null;
+      }
       pollingActive = false;
       if (ws) {
         try { ws.close(); } catch (e) {}
