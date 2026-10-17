@@ -730,39 +730,45 @@ bool ScreenMirrorComponent::send_dirty_update() {
     return this->send_full_keyframe(-1);
   }
 
-  std::lock_guard<std::mutex> jpeg_lock(this->jpeg_mutex_);
+  size_t total_payload_len = 0;
+  {
+    std::lock_guard<std::mutex> jpeg_lock(this->jpeg_mutex_);
 
-  // Encode JPEG into jpeg_buffer_ + 10 (leaving 10 bytes for binary header)
-  uint8_t *jpeg_dest = this->jpeg_buffer_ + 10;
-  size_t max_out = (this->jpeg_buffer_size_ > 10) ? (this->jpeg_buffer_size_ - 10) : 0;
-  size_t out_size = 0;
-  if (!this->encode_jpeg(pixel_src, w, h, jpeg_dest, out_size, max_out) || out_size == 0) {
-    return false;
+    // Encode JPEG into jpeg_buffer_ + 10 (leaving 10 bytes for binary header)
+    uint8_t *jpeg_dest = this->jpeg_buffer_ + 10;
+    size_t max_out = (this->jpeg_buffer_size_ > 10) ? (this->jpeg_buffer_size_ - 10) : 0;
+    size_t out_size = 0;
+    if (!this->encode_jpeg(pixel_src, w, h, jpeg_dest, out_size, max_out) || out_size == 0) {
+      return false;
+    }
+
+    // Fill 10-byte binary header
+    uint8_t rot_code = static_cast<uint8_t>((this->rotation_ / 90) & 0x03);
+    this->jpeg_buffer_[0] = 0x44; // 'D' = Delta
+    this->jpeg_buffer_[1] = (rot_code << 2); // flags: rotation in bits 2-3, bit 0 = 0 (delta)
+    this->jpeg_buffer_[2] = static_cast<uint8_t>((x1 >> 8) & 0xFF);
+    this->jpeg_buffer_[3] = static_cast<uint8_t>(x1 & 0xFF);
+    this->jpeg_buffer_[4] = static_cast<uint8_t>((y1 >> 8) & 0xFF);
+    this->jpeg_buffer_[5] = static_cast<uint8_t>(y1 & 0xFF);
+    this->jpeg_buffer_[6] = static_cast<uint8_t>((w >> 8) & 0xFF);
+    this->jpeg_buffer_[7] = static_cast<uint8_t>(w & 0xFF);
+    this->jpeg_buffer_[8] = static_cast<uint8_t>((h >> 8) & 0xFF);
+    this->jpeg_buffer_[9] = static_cast<uint8_t>(h & 0xFF);
+
+    total_payload_len = 10 + out_size;
   }
 
-  // Fill 10-byte binary header
-  uint8_t rot_code = static_cast<uint8_t>((this->rotation_ / 90) & 0x03);
-  this->jpeg_buffer_[0] = 0x44; // 'D' = Delta
-  this->jpeg_buffer_[1] = (rot_code << 2); // flags: rotation in bits 2-3, bit 0 = 0 (delta)
-  this->jpeg_buffer_[2] = static_cast<uint8_t>((x1 >> 8) & 0xFF);
-  this->jpeg_buffer_[3] = static_cast<uint8_t>(x1 & 0xFF);
-  this->jpeg_buffer_[4] = static_cast<uint8_t>((y1 >> 8) & 0xFF);
-  this->jpeg_buffer_[5] = static_cast<uint8_t>(y1 & 0xFF);
-  this->jpeg_buffer_[6] = static_cast<uint8_t>((w >> 8) & 0xFF);
-  this->jpeg_buffer_[7] = static_cast<uint8_t>(w & 0xFF);
-  this->jpeg_buffer_[8] = static_cast<uint8_t>((h >> 8) & 0xFF);
-  this->jpeg_buffer_[9] = static_cast<uint8_t>(h & 0xFF);
-
-  size_t total_payload_len = 10 + out_size;
-
 #if defined(USE_ESP32) && defined(CONFIG_HTTPD_WS_SUPPORT)
-  std::vector<int> dead_fds;
+  std::vector<int> clients;
   {
     std::lock_guard<std::mutex> lock(this->ws_mutex_);
-    for (int fd : this->ws_client_fds_) {
-      if (!this->send_ws_binary_packet(fd, this->jpeg_buffer_, total_payload_len)) {
-        dead_fds.push_back(fd);
-      }
+    clients = this->ws_client_fds_;
+  }
+
+  std::vector<int> dead_fds;
+  for (int fd : clients) {
+    if (!this->send_ws_binary_packet(fd, this->jpeg_buffer_, total_payload_len)) {
+      dead_fds.push_back(fd);
     }
   }
   for (int dead_fd : dead_fds) {
@@ -782,43 +788,48 @@ bool ScreenMirrorComponent::send_full_keyframe(int target_fd) {
   if (!this->capture_frame_rgb565(raw_buf, hw_w, hw_h) || raw_buf == nullptr)
     return false;
 
-  std::lock_guard<std::mutex> jpeg_lock(this->jpeg_mutex_);
+  size_t total_payload_len = 0;
+  {
+    std::lock_guard<std::mutex> jpeg_lock(this->jpeg_mutex_);
 
-  uint8_t *jpeg_dest = this->jpeg_buffer_ + 10;
-  size_t max_out = (this->jpeg_buffer_size_ > 10) ? (this->jpeg_buffer_size_ - 10) : 0;
-  size_t out_size = 0;
-  if (!this->encode_jpeg(raw_buf, hw_w, hw_h, jpeg_dest, out_size, max_out) || out_size == 0) {
-    return false;
+    uint8_t *jpeg_dest = this->jpeg_buffer_ + 10;
+    size_t max_out = (this->jpeg_buffer_size_ > 10) ? (this->jpeg_buffer_size_ - 10) : 0;
+    size_t out_size = 0;
+    if (!this->encode_jpeg(raw_buf, hw_w, hw_h, jpeg_dest, out_size, max_out) || out_size == 0) {
+      return false;
+    }
+
+    // Fill 10-byte binary header
+    uint8_t rot_code = static_cast<uint8_t>((this->rotation_ / 90) & 0x03);
+    this->jpeg_buffer_[0] = 0x46; // 'F' = Full Keyframe
+    this->jpeg_buffer_[1] = (rot_code << 2) | 0x01; // flags: rotation in bits 2-3, bit 0 = 1 (IS_KEYFRAME)
+    this->jpeg_buffer_[2] = 0;
+    this->jpeg_buffer_[3] = 0;
+    this->jpeg_buffer_[4] = 0;
+    this->jpeg_buffer_[5] = 0;
+    this->jpeg_buffer_[6] = static_cast<uint8_t>((hw_w >> 8) & 0xFF);
+    this->jpeg_buffer_[7] = static_cast<uint8_t>(hw_w & 0xFF);
+    this->jpeg_buffer_[8] = static_cast<uint8_t>((hw_h >> 8) & 0xFF);
+    this->jpeg_buffer_[9] = static_cast<uint8_t>(hw_h & 0xFF);
+
+    total_payload_len = 10 + out_size;
   }
-
-  // Fill 10-byte binary header
-  uint8_t rot_code = static_cast<uint8_t>((this->rotation_ / 90) & 0x03);
-  this->jpeg_buffer_[0] = 0x46; // 'F' = Full Keyframe
-  this->jpeg_buffer_[1] = (rot_code << 2) | 0x01; // flags: rotation in bits 2-3, bit 0 = 1 (IS_KEYFRAME)
-  this->jpeg_buffer_[2] = 0;
-  this->jpeg_buffer_[3] = 0;
-  this->jpeg_buffer_[4] = 0;
-  this->jpeg_buffer_[5] = 0;
-  this->jpeg_buffer_[6] = static_cast<uint8_t>((hw_w >> 8) & 0xFF);
-  this->jpeg_buffer_[7] = static_cast<uint8_t>(hw_w & 0xFF);
-  this->jpeg_buffer_[8] = static_cast<uint8_t>((hw_h >> 8) & 0xFF);
-  this->jpeg_buffer_[9] = static_cast<uint8_t>(hw_h & 0xFF);
-
-  size_t total_payload_len = 10 + out_size;
 
 #if defined(USE_ESP32) && defined(CONFIG_HTTPD_WS_SUPPORT)
   std::vector<int> dead_fds;
-  {
-    std::lock_guard<std::mutex> lock(this->ws_mutex_);
-    if (target_fd >= 0) {
-      if (!this->send_ws_binary_packet(target_fd, this->jpeg_buffer_, total_payload_len)) {
-        dead_fds.push_back(target_fd);
-      }
-    } else {
-      for (int fd : this->ws_client_fds_) {
-        if (!this->send_ws_binary_packet(fd, this->jpeg_buffer_, total_payload_len)) {
-          dead_fds.push_back(fd);
-        }
+  if (target_fd >= 0) {
+    if (!this->send_ws_binary_packet(target_fd, this->jpeg_buffer_, total_payload_len)) {
+      dead_fds.push_back(target_fd);
+    }
+  } else {
+    std::vector<int> clients;
+    {
+      std::lock_guard<std::mutex> lock(this->ws_mutex_);
+      clients = this->ws_client_fds_;
+    }
+    for (int fd : clients) {
+      if (!this->send_ws_binary_packet(fd, this->jpeg_buffer_, total_payload_len)) {
+        dead_fds.push_back(fd);
       }
     }
   }
